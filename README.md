@@ -12,8 +12,8 @@ O projeto foi estruturado para ser imediatamente utilizável por qualquer usuár
 
 ```bash
 # 1. Clonar o repositório
-git clone https://github.com/<seu-usuario>/ipod-sync.git
-cd ipod-sync
+git clone https://github.com/sergioprates/ipod-cli.git
+cd ipod-cli
 
 # 2. Executar comandos diretamente com uv
 uv run ipod detect
