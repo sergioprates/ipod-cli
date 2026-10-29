@@ -1,0 +1,1007 @@
+"""Coordinated, append-only artwork preparation over caller-supplied assets."""
+
+import logging
+from collections import Counter
+from dataclasses import replace
+from itertools import pairwise
+
+from iPodDB.ArtworkDB.builder.build_ArtworkDB import (
+    new_artwork_chunk,
+    new_ArtworkDB,
+    new_auxiliary_mhod,
+    new_container_mhod,
+    new_string_mhod,
+)
+from iPodDB.ArtworkDB.ithmb import (
+    DecodedImage,
+    IthmbLayout,
+    IthmbPixelFormat,
+    decode_ithmb,
+)
+from iPodDB.ArtworkDB.ithmb_writer import encode_ithmb
+from iPodDB.ArtworkDB.shared.artwork_index import build_artwork_index, thumbnail_payload
+from iPodDB.ArtworkDB.shared.chunk_defs.mhfd import MhfdHeader
+from iPodDB.ArtworkDB.shared.chunk_defs.mhif import DEFINITION as MHIF
+from iPodDB.ArtworkDB.shared.chunk_defs.mhif import MhifHeader
+from iPodDB.ArtworkDB.shared.chunk_defs.mhii import DEFINITION as MHII
+from iPodDB.ArtworkDB.shared.chunk_defs.mhii import MhiiHeader
+from iPodDB.ArtworkDB.shared.chunk_defs.mhni import DEFINITION as MHNI
+from iPodDB.ArtworkDB.shared.chunk_defs.mhni import MhniHeader
+from iPodDB.ArtworkDB.shared.chunk_defs.mhod import MhodHeader
+from iPodDB.ArtworkDB.shared.chunk_defs.mhod_payloads.container_mhod import (
+    MhodContainerPayload,
+)
+from iPodDB.ArtworkDB.shared.chunk_defs.mhod_payloads.string_mhod import (
+    MhodStringPayload,
+)
+from iPodDB.ArtworkDB.shared.chunk_defs.mhsd import MhsdHeader
+from iPodDB.ArtworkDB.shared.constants import ArtworkMhodType
+from iPodDB.iTunesDB.shared.chunk_defs.mhbd import MhbdHeader
+from iPodDB.iTunesDB.shared.chunk_defs.mhit import MhitHeader
+from iPodDB.library._artwork_paths import artwork_path as artwork_path
+from iPodDB.library._artwork_paths import validated_path as validated_path
+from iPodDB.library._artwork_timing import (
+    artwork_formats,
+    checked_artwork_count,
+    comparable_group,
+    desired_frames,
+    group_children,
+    referenced_group,
+    retained_group_pixels,
+    zero_source_size,
+)
+from iPodDB.library._artwork_timing import (
+    asset_formats as requested_formats,
+)
+from iPodDB.library._document_edit import rebuild
+from iPodDB.library._resolved_write import ResolvedWrite
+from iPodDB.library.artwork import CoverFormat
+from iPodDB.library.file_content import (
+    ContentBuffer,
+    MemoryContentBuffer,
+    content_chunks,
+    content_sha256,
+)
+from iPodDB.library.writing import (
+    ArtworkAsset,
+    ArtworkGroupReference,
+    IdentityMapping,
+    PreparedFile,
+    TimedArtworkAsset,
+    WriteResources,
+    WriteTarget,
+)
+from iPodDB.shared.binary_struct import binary_fields
+from iPodDB.shared.chunk import ChunkHeader, DatabaseDocument, ParsedChunk
+
+logger = logging.getLogger(__name__)
+
+_ARTWORK_LINK = next(
+    f.schema for f in binary_fields(MhitHeader) if f.attribute_name == "artwork_id_ref"
+)
+
+
+def retained_artwork_extents(
+    artwork: DatabaseDocument[MhfdHeader],
+) -> tuple[tuple[int, str, int], ...]:
+    """Reserve even typed filenames whose unusable image is omitted by the index."""
+    return tuple(
+        (
+            selection.chunk.header.image_id,
+            artwork_path(child.payload.value),
+            container.payload.child.header.ithmb_offset
+            + max(
+                container.payload.child.header.image_size,
+                container.payload.child.header.image_size_2,
+            ),
+        )
+        for selection in artwork.find_chunks(MhiiHeader)
+        for container in selection.chunk.children
+        if isinstance(container.payload, MhodContainerPayload)
+        for child in container.payload.child.children
+        if isinstance(child.header, MhodHeader)
+        and child.header.mhod_type == ArtworkMhodType.FILE_NAME
+        and isinstance(child.payload, MhodStringPayload)
+    )
+
+
+def _is_f1061_layout(cover: CoverFormat) -> bool:
+    return (
+        cover.format_id == 1061
+        and cover.width == 56
+        and cover.height in (55, 56)
+        and cover.row_bytes == 112
+        and cover.pixel_format is IthmbPixelFormat.RGB565_LE
+    )
+
+
+def _fixed_frame_size(cover: CoverFormat) -> int:
+    rotated = cover.pixel_format is IthmbPixelFormat.RGB565_BE_90
+    if cover.pixel_format is IthmbPixelFormat.I420_LE:
+        return cover.width * cover.height * 2
+    return (cover.row_bytes or (cover.height if rotated else cover.width) * 2) * (
+        cover.width if rotated else cover.height
+    )
+
+
+def superseded_artwork(
+    artwork: DatabaseDocument[MhfdHeader] | None,
+    resolved: ResolvedWrite,
+    resources: WriteResources,
+) -> frozenset[int]:
+    """Damaged images whose last live owner receives verified replacement pixels."""
+    if artwork is None or not resources.artwork:
+        return frozenset()
+    inventory = {
+        item.relative_path.casefold(): item for item in resources.file_inventory or ()
+    }
+    unavailable = {
+        artwork_path(path).casefold() for path in resources.reserved_artwork_paths
+    }
+    damaged = {
+        image_id
+        for image_id, path, extent in retained_artwork_extents(artwork)
+        if path.casefold() in unavailable
+        or (dependency := inventory.get(path.casefold())) is None
+        or extent > dependency.size
+    }
+    assets = {asset.artwork_id: asset for asset in resources.artwork}
+    rows = {s.chunk.header.image_id: s.chunk for s in artwork.find_chunks(MhiiHeader)}
+    original = {track.track_id: track for track in resolved.original.tracks}
+    live = {track.artwork_id for track in resolved.desired.tracks}
+    retained = {
+        frame.source.artwork_id
+        for track in resolved.desired.tracks
+        if (asset := assets.get(track.artwork_id)) is not None
+        for frame in desired_frames(
+            asset,
+            rows.get(original[track.track_id].artwork_id)
+            if track.track_id in original
+            else None,
+        )
+        if isinstance(frame.source, ArtworkGroupReference)
+    }
+    live.update(retained)
+    previous_live = {track.artwork_id for track in resolved.original.tracks}
+    damaged_orphans = {
+        selection.chunk.header.image_id
+        for selection in artwork.find_chunks(MhiiHeader)
+        if selection.chunk.header.image_id in damaged
+        and selection.chunk.header.image_id not in previous_live | live
+        and not selection.chunk.header.db_track_id_ref
+    }
+    changed_tracks = set(resolved.artwork_tracks)
+    return frozenset(damaged_orphans) | frozenset(
+        original[track.track_id].artwork_id
+        for track in resolved.desired.tracks
+        if track.track_id in changed_tracks
+        and track.track_id in original
+        and track.artwork_id in assets
+        and original[track.track_id].artwork_id
+        and original[track.track_id].artwork_id not in live
+        and original[track.track_id].artwork_id in damaged
+    )
+
+
+def _validate_retained_artwork_format(
+    artwork: DatabaseDocument[MhfdHeader],
+    cover: CoverFormat,
+    size: int,
+    resources: WriteResources,
+    excluded_images: frozenset[int] = frozenset(),
+) -> None:
+    """Validate retained rasters and allocations, allowing known F1061 variants.
+
+    Raw fixed-size rasters need no content-dependent decoding to establish their
+    extent. Captured fingerprints bind even full shards (whose bytes need not be
+    loaded for appending) to the eventual Storage Transaction.
+    """
+    if cover.pixel_format is IthmbPixelFormat.JPEG:
+        raise ValueError("Variable-size artwork cannot establish a fixed MHIF size.")
+    packed_rgb = cover.row_bytes > 0 and cover.pixel_format in {
+        IthmbPixelFormat.RGB565_LE,
+        IthmbPixelFormat.RGB565_BE,
+        IthmbPixelFormat.RGB565_BE_90,
+        IthmbPixelFormat.RGB555_LE,
+        IthmbPixelFormat.RGB555_BE,
+        IthmbPixelFormat.REC_RGB555_LE,
+    }
+    inventory = {f.relative_path.casefold(): f for f in resources.file_inventory or ()}
+    ranges: dict[str, set[tuple[int, int, int]]] = {}
+    for selection in artwork.find_chunks(MhiiHeader):
+        if selection.chunk.header.image_id in excluded_images:
+            continue
+        times: set[int] = set()
+        for child in selection.chunk.children:
+            payload = thumbnail_payload(child)
+            if payload is None:
+                if (
+                    isinstance(child.header, MhodHeader)
+                    and child.header.mhod_type == ArtworkMhodType.THUMBNAIL_IMAGE
+                ):
+                    raise ValueError(
+                        "A retained thumbnail representation is unrecognized."
+                    )
+                continue
+            location = payload.child
+            header = location.header
+            if header.format_id != cover.format_id:
+                continue
+            if header.image_time_key in times:
+                raise ValueError(
+                    "A retained image has duplicate representations of this format."
+                )
+            times.add(header.image_time_key)
+            image_size, height = header.image_size, cover.height
+            # libgpod leaves the optional allocation field zero; foo_dop stores
+            # its padded allocation here. Neither changes the raster length.
+            allocation = header.image_size_2 or image_size
+            if _is_f1061_layout(cover):
+                if image_size not in (6160, 6272) or allocation < image_size:
+                    raise ValueError(
+                        "Retained F1061 MHNI raster or allocation size is unsupported: "
+                        f"image={selection.chunk.header.image_id}, "
+                        f"raster={image_size}, allocation={allocation}."
+                    )
+                height = image_size // cover.row_bytes
+            elif image_size != size or allocation < image_size:
+                raise ValueError(
+                    "Retained MHNI image sizes disagree with the target layout."
+                )
+            for dimension, padding, expected in (
+                (header.image_width, header.horizontal_padding, cover.width),
+                (header.image_height, header.vertical_padding, height),
+            ):
+                # Packed RGB stride and size establish the raster independently
+                # of its visible dimensions; content need not fill or be centered
+                # in that raster. Planar/field layouts retain their stricter rule.
+                if not (
+                    0 <= padding < dimension <= expected
+                    and (
+                        packed_rgb
+                        or dimension == expected
+                        or dimension + padding == expected
+                    )
+                ):
+                    raise ValueError(
+                        "Retained MHNI dimensions or padding disagree with the target layout: "
+                        f"format={cover.format_id}, image={selection.chunk.header.image_id}, "
+                        f"dimensions={header.image_width}x{header.image_height}, "
+                        f"padding={header.horizontal_padding}x{header.vertical_padding}, "
+                        f"raster={cover.width}x{height}."
+                    )
+            names = tuple(
+                c.payload.value
+                for c in location.children
+                if isinstance(c.header, MhodHeader)
+                and c.header.mhod_type == ArtworkMhodType.FILE_NAME
+                and isinstance(c.payload, MhodStringPayload)
+            )
+            if len(names) != 1:
+                raise ValueError(
+                    "A retained image requires exactly one thumbnail filename."
+                )
+            path = artwork_path(names[0]).casefold()
+            dependency = inventory.get(path)
+            if (
+                dependency is None
+                or header.ithmb_offset < 0
+                or header.ithmb_offset + allocation > dependency.size
+            ):
+                raise ValueError(
+                    "A retained image range is missing or outside its captured thumbnail file."
+                )
+            ranges.setdefault(path, set()).add(
+                (header.ithmb_offset, header.ithmb_offset + allocation, image_size)
+            )
+    if not ranges and not excluded_images:
+        raise ValueError("No retained MHNI images establish the expected size.")
+    for extents in ranges.values():
+        ordered = sorted(extents)
+        if any(right[0] < left[1] for left, right in pairwise(ordered)):
+            raise ValueError("Retained image ranges partially overlap.")
+
+
+def effective_cover_format(
+    artwork: DatabaseDocument[MhfdHeader] | None,
+    cover: CoverFormat,
+    resources: WriteResources,
+    retained_size: int | None,
+    excluded_images: frozenset[int] = frozenset(),
+) -> CoverFormat:
+    """Use the evidenced F1061 row count when extending an existing ArtworkDB."""
+    if artwork is None or not _is_f1061_layout(cover):
+        return cover
+    image_sizes = Counter(
+        payload.child.header.image_size
+        for selection in artwork.find_chunks(MhiiHeader)
+        if selection.chunk.header.image_id not in excluded_images
+        for child in selection.chunk.children
+        if (payload := thumbnail_payload(child)) is not None
+        and payload.child.header.format_id == 1061
+    )
+    if image_sizes:
+        _validate_retained_artwork_format(
+            artwork, cover, cover.height * cover.row_bytes, resources, excluded_images
+        )
+        # Keep a recognized declaration when both variants occur. A uniform
+        # library still repairs stale MHIF metadata from its actual rasters.
+        if retained_size is not None and retained_size in image_sizes:
+            image_size = retained_size
+        else:
+            default_size = cover.height * cover.row_bytes
+            image_size = max(
+                image_sizes,
+                key=lambda size: (image_sizes[size], size == default_size),
+            )
+        return replace(cover, height=image_size // cover.row_bytes)
+    # With no retained F1061 images, the MHIF entry is the only on-disk layout
+    # declaration. A new ArtworkDB uses the Device Profile's default instead.
+    if retained_size in (6160, 6272):
+        return replace(cover, height=retained_size // cover.row_bytes)
+    return cover
+
+
+def reconcile_artwork(
+    itunes: DatabaseDocument[MhbdHeader],
+    artwork: DatabaseDocument[MhfdHeader] | None,
+    resolved: ResolvedWrite,
+    mappings: tuple[IdentityMapping, ...],
+    target: WriteTarget,
+    resources: WriteResources,
+) -> tuple[
+    DatabaseDocument[MhbdHeader],
+    DatabaseDocument[MhfdHeader] | None,
+    tuple[PreparedFile, ...],
+    tuple[IdentityMapping, ...],
+]:
+    original, desired = resolved.original, resolved.desired
+    before = {t.track_id: t for t in original.tracks}
+    assets = {a.artwork_id: a for a in resources.artwork}
+    tracks = {t.track_id: t for t in desired.tracks}
+    changed = [tracks[i] for i in resolved.artwork_tracks]
+    deleted = resolved.deleted_tracks
+    logger.debug(
+        "Artwork reconciliation source=%s present=%s changed_tracks=%s deleted_tracks=%s assets=%d formats=%d",
+        resolved.plan.draft.source_revision,
+        artwork is not None,
+        sorted(resolved.artwork_tracks),
+        sorted(deleted),
+        len(assets),
+        len(target.cover_formats),
+    )
+    if not changed and not deleted:
+        logger.debug(
+            "ArtworkDB and iTHMB ranges retained unchanged; no artwork selection or ownership changes"
+        )
+        return itunes, artwork, (), ()
+    if artwork is None and any(t.artwork_id for t in changed):
+        if target.artwork_root_value is None:
+            raise ValueError(
+                "Creating an ArtworkDB requires an evidenced artwork root value in the write target."
+            )
+        # Original iOpenPod and libgpod start fresh album-art identities at 100.
+        artwork = new_ArtworkDB(
+            next_mhii_id=100, unk_mhfd_0x10=target.artwork_root_value
+        )
+    native_ids = {m.draft_id: m.output_id for m in mappings if m.subject == "track"}
+    track_chunks = {
+        s.chunk.header.track_id: s.chunk for s in itunes.find_chunks(MhitHeader)
+    }
+    if artwork is None:
+        edits: dict[int, ParsedChunk[ChunkHeader] | None] = {}
+        for track in changed:
+            chunk = track_chunks[native_ids.get(track.track_id, track.track_id)]
+            edits[id(chunk)] = replace(
+                chunk,
+                header=replace(
+                    chunk.header,
+                    artwork_id_ref=0,
+                    artwork_count=0,
+                    artwork_size=0,
+                    has_artwork=0,
+                ),
+            )
+        return rebuild(itunes, edits), None, (), ()
+    image_datasets = tuple(
+        s for s in artwork.find_chunks(MhsdHeader) if s.chunk.header.dataset_type == 1
+    )
+    if len(image_datasets) != 1:
+        raise ValueError("Artwork changes require exactly one image dataset.")
+    image_dataset = image_datasets[0]
+    file_datasets = tuple(
+        s for s in artwork.find_chunks(MhsdHeader) if s.chunk.header.dataset_type == 3
+    )
+    if assets and len(file_datasets) != 1:
+        raise ValueError("Artwork encoding requires exactly one file-format dataset.")
+    format_entries = (
+        tuple(s.chunk.header for s in file_datasets[0].find_chunks(MhifHeader))
+        if len(file_datasets) == 1
+        else ()
+    )
+    if assets and len({f.format_id for f in format_entries}) != len(format_entries):
+        raise ValueError("Artwork file-format entries contain duplicate format IDs.")
+    retained_sizes = {f.format_id: f.image_size for f in format_entries}
+    rows = {
+        s.chunk.header.image_id: s.chunk for s in image_dataset.find_chunks(MhiiHeader)
+    }
+    source_rows = dict(rows)
+    # A legacy cover asset updates zero only. Sharing it across different
+    # retained timelines would otherwise discard all but the first timeline.
+    legacy_tails: dict[int, tuple[ParsedChunk[ChunkHeader], ...]] = {}
+    legacy_formats: dict[int, tuple[CoverFormat, ...]] = {}
+    for track in changed:
+        asset = assets.get(track.artwork_id)
+        if not isinstance(asset, ArtworkAsset):
+            continue
+        old = (
+            source_rows.get(before[track.track_id].artwork_id)
+            if track.track_id in before
+            else None
+        )
+        tail = (
+            tuple(
+                comparable_group(c)
+                for c in old.children
+                if (payload := thumbnail_payload(c)) is not None
+                and payload.child.header.image_time_key != 0
+            )
+            if old
+            else ()
+        )
+        if asset.artwork_id in legacy_tails and tail != legacy_tails[asset.artwork_id]:
+            raise ValueError(
+                "A shared cover refresh has different retained timelines; supply explicit timed artwork for each desired sequence."
+            )
+        legacy_tails[asset.artwork_id] = tail
+        wanted_formats = requested_formats(target, asset, old)
+        if (
+            asset.artwork_id in legacy_formats
+            and wanted_formats != legacy_formats[asset.artwork_id]
+        ):
+            raise ValueError(
+                "A shared cover refresh has different existing zero-time formats; supply explicit timed artwork for each desired sequence."
+            )
+        legacy_formats[asset.artwork_id] = wanted_formats
+    index = build_artwork_index(artwork)
+    superseded = superseded_artwork(artwork, resolved, resources)
+    inventory = (
+        {}
+        if resources.file_inventory is None
+        else {f.relative_path: f for f in resources.file_inventory}
+    )
+    source_files = {f.dependency.relative_path: f for f in resources.files}
+    output_files: dict[str, ContentBuffer] = {}
+    create_buffer = resources.create_file_buffer or MemoryContentBuffer
+    all_paths = set(inventory)
+    if len({p.casefold() for p in all_paths}) != len(all_paths):
+        raise ValueError(
+            "Artwork file inventory contains case-insensitive path collisions."
+        )
+    retained_extents = retained_artwork_extents(artwork) if assets else ()
+    referenced_paths = {path for _, path, _ in retained_extents}
+    unavailable_paths = {
+        artwork_path(path) for path in resources.reserved_artwork_paths
+    }
+    folded_unavailable = {path.casefold() for path in unavailable_paths}
+    # Missing files remain reserved by their retained database records. Never
+    # recreate their old names or accidentally make stale ranges appear valid.
+    all_paths.update(referenced_paths)
+    all_paths.update(unavailable_paths)
+    folded_inventory = {p.casefold(): f for p, f in inventory.items()}
+    damaged_paths = {
+        path.casefold()
+        for _, path, extent in retained_extents
+        if extent > 0
+        and (
+            (dependency := folded_inventory.get(path.casefold())) is None
+            or extent > dependency.size
+        )
+    }
+    all_formats = artwork_formats(target, timed=True)
+    if assets and damaged_paths:
+        for cover in all_formats:
+            try:
+                _validate_retained_artwork_format(
+                    artwork, cover, _fixed_frame_size(cover), resources, superseded
+                )
+            except ValueError as error:
+                raise ValueError(f"Automatic correction is unsafe: {error}") from error
+    formats = {
+        f.format_id: (
+            effective_cover_format(
+                artwork, f, resources, retained_sizes.get(f.format_id), superseded
+            )
+            if assets
+            else f
+        )
+        for f in all_formats
+    }
+    next_id = max(
+        artwork.header.next_mhii_id,
+        max(rows, default=0) + 1,
+        max((chunk.header.artwork_id_ref for chunk in track_chunks.values()), default=0)
+        + 1,
+        1,
+    )
+    art_mappings: list[IdentityMapping] = []
+    resolved_assets: dict[int, int] = {}
+    file_sizes: dict[int, int] = {}
+    corrected_sizes: dict[int, int] = {}
+    modified_owners = {
+        track_chunks[native_ids.get(t.track_id, t.track_id)].header.db_track_id
+        for t in changed
+    }
+    modified_owners.update(
+        details.db_track_id for t in deleted if (details := before[t].ipod) is not None
+    )
+    # Clear every old reverse link; direct references of other Tracks remain.
+    for identity, row in tuple(rows.items()):
+        if row.header.db_track_id_ref and row.header.db_track_id_ref in modified_owners:
+            rows[identity] = replace(row, header=replace(row.header, db_track_id_ref=0))
+
+    def append_image(format_id: int, payload: bytes) -> tuple[str, int]:
+        if resources.file_inventory is None:
+            raise ValueError("Artwork encoding requires a captured file inventory.")
+        if len(payload) > min(target.max_artwork_file_bytes, 0xFFFFFFFF):
+            raise ValueError("One thumbnail exceeds the artwork file size limit.")
+        # Use only the established F<format>_<shard>.ithmb namespace. The full
+        # inventory reserves even files not referenced by the database.
+        number = 1
+        while True:
+            path = f"iPod_Control/Artwork/F{format_id}_{number}.ithmb"
+            collision = next(
+                (p for p in all_paths if p.casefold() == path.casefold()), None
+            )
+            if collision is not None:
+                path = collision
+            prefix = output_files.get(path)
+            if prefix is None and (
+                path.casefold() in damaged_paths
+                or path.casefold() in folded_unavailable
+                or (collision is not None and path not in inventory)
+            ):
+                number += 1
+                continue
+            if prefix is None and path in inventory:
+                if aligned_offset(inventory[path].size, len(payload)) + len(
+                    payload
+                ) > min(target.max_artwork_file_bytes, 0xFFFFFFFF):
+                    number += 1
+                    continue
+                source = source_files.get(path)
+                if source is None:
+                    raise ValueError(
+                        f"Supply verified source bytes before appending to {path}."
+                    )
+                dependency = inventory[path]
+                if (
+                    source.dependency != dependency
+                    or len(source.data) != dependency.size
+                    or content_sha256(source.data) != dependency.sha256
+                ):
+                    raise ValueError(
+                        f"The captured source fingerprint changed for {path}."
+                    )
+                prefix = create_buffer()
+                for block in content_chunks(source.data):
+                    prefix.append(block)
+            if prefix is None:
+                prefix = create_buffer()
+            offset = aligned_offset(len(prefix), len(payload))
+            if offset + len(payload) <= min(target.max_artwork_file_bytes, 0xFFFFFFFF):
+                prefix.append(bytes(offset - len(prefix)))
+                prefix.append(payload)
+                output_files[path] = prefix
+                all_paths.add(path)
+                return path, offset
+            number += 1
+
+    track_edits: dict[int, ParsedChunk[ChunkHeader] | None] = {}
+    for track in changed:
+        chunk = track_chunks[native_ids.get(track.track_id, track.track_id)]
+        requested = track.artwork_id
+        if requested == 0:
+            track_edits[id(chunk)] = replace(
+                chunk,
+                header=replace(
+                    chunk.header,
+                    artwork_id_ref=0,
+                    artwork_count=0,
+                    artwork_size=0,
+                    has_artwork=0,
+                ),
+            )
+            continue
+        if requested in resolved_assets:
+            image_id = resolved_assets[requested]
+        elif requested not in assets:
+            if requested not in rows:
+                raise ValueError(f"Artwork {requested} requires an RGB888 asset.")
+            image_id = requested
+        else:
+            if not formats:
+                raise ValueError("This target has no supported cover formats.")
+            asset = assets[requested]
+            old_id = (
+                before[track.track_id].artwork_id if track.track_id in before else 0
+            )
+            source_row = source_rows.get(old_id)
+            frames = desired_frames(asset, source_row)
+            checked_artwork_count(len(frames))
+            asset_formats = {
+                f.format_id: formats[f.format_id]
+                for f in requested_formats(target, asset, source_row)
+            }
+            thumbnail_count = 0
+            for frame in frames:
+                if isinstance(frame.source, ArtworkGroupReference):
+                    retained = referenced_group(source_rows, frame)
+                    thumbnail_count += len(retained)
+                    if (
+                        isinstance(asset, TimedArtworkAsset)
+                        and frame.display_time_ms != 0xFFFFFFFF
+                    ):
+                        retained_formats = {
+                            child.payload.child.header.format_id
+                            for child in retained
+                            if isinstance(child.payload, MhodContainerPayload)
+                        }
+                        thumbnail_count += len(asset_formats.keys() - retained_formats)
+                else:
+                    thumbnail_count += len(asset_formats)
+                if thumbnail_count > 0xFFFF:
+                    raise ValueError(
+                        "Artwork exceeds the native thumbnail count limit."
+                    )
+            for frame in frames:
+                if (
+                    isinstance(frame.source, ArtworkGroupReference)
+                    or source_row is None
+                ):
+                    continue
+                prior = group_children(source_row, frame.display_time_ms)
+                headers = [
+                    c.payload.child.header
+                    for c in prior
+                    if isinstance(c.payload, MhodContainerPayload)
+                ]
+                if any(
+                    h.format_id <= 0 or max(h.image_size, h.image_size_2) <= 0
+                    for h in headers
+                ) or len({h.format_id for h in headers}) != len(headers):
+                    raise ValueError(
+                        "The artwork being replaced has malformed or duplicate image representations."
+                    )
+                if any(h.format_id not in asset_formats for h in headers):
+                    raise ValueError(
+                        "Artwork replacement would leave an unsupported representation stale."
+                    )
+            image_id, next_id = next_id, next_id + 1
+            if next_id > 0xFFFFFFFF:
+                raise ValueError("Artwork identities are exhausted.")
+            row = source_row or new_artwork_chunk(MHII, MhiiHeader())
+            children: list[ParsedChunk[ChunkHeader]] = []
+            for frame in frames:
+                frame_formats = asset_formats
+                if isinstance(frame.source, ArtworkGroupReference):
+                    retained = referenced_group(source_rows, frame)
+                    for child in retained:
+                        assert isinstance(child.payload, MhodContainerPayload)
+                        location = child.payload.child
+                        retained_names = tuple(
+                            c.payload.value
+                            for c in location.children
+                            if isinstance(c.header, MhodHeader)
+                            and c.header.mhod_type == ArtworkMhodType.FILE_NAME
+                            and isinstance(c.payload, MhodStringPayload)
+                        )
+                        if (
+                            len(retained_names) != 1
+                            or max(
+                                location.header.image_size, location.header.image_size_2
+                            )
+                            <= 0
+                        ):
+                            raise ValueError(
+                                "A referenced artwork group has an unbounded thumbnail range."
+                            )
+                        path = artwork_path(retained_names[0]).casefold()
+                        dependency = folded_inventory.get(path)
+                        extent = location.header.ithmb_offset + max(
+                            location.header.image_size, location.header.image_size_2
+                        )
+                        if (
+                            path in folded_unavailable
+                            or dependency is None
+                            or extent > dependency.size
+                        ):
+                            raise ValueError(
+                                "A referenced artwork group requires its captured thumbnail file and complete retained range."
+                            )
+                    children.extend(retained)
+                    retained_formats = {
+                        c.payload.child.header.format_id
+                        for c in retained
+                        if isinstance(c.payload, MhodContainerPayload)
+                    }
+                    frame_formats = (
+                        {
+                            key: cover
+                            for key, cover in asset_formats.items()
+                            if key not in retained_formats
+                        }
+                        if isinstance(asset, TimedArtworkAsset)
+                        and frame.display_time_ms != 0xFFFFFFFF
+                        else {}
+                    )
+                    if not frame_formats:
+                        continue
+                    pixels = retained_group_pixels(
+                        index.item_for_image_id(frame.source.artwork_id),
+                        frame.source,
+                        tuple(formats.values()),
+                        resources,
+                    )
+                else:
+                    pixels = frame.source
+                templates = (
+                    group_children(source_row, frame.display_time_ms)
+                    if source_row
+                    else ()
+                )
+                for cover in frame_formats.values():
+                    layout = IthmbLayout(
+                        cover.width, cover.height, cover.row_bytes, cover.pixel_format
+                    )
+                    encoded = encode_ithmb(
+                        DecodedImage(pixels.width, pixels.height, pixels.rgb888), layout
+                    )
+                    if cover.format_id in retained_sizes and retained_sizes[
+                        cover.format_id
+                    ] != len(encoded):
+                        retained_size = retained_sizes[cover.format_id]
+                        try:
+                            _validate_retained_artwork_format(
+                                artwork, cover, len(encoded), resources, superseded
+                            )
+                        except ValueError as error:
+                            raise ValueError(
+                                f"Artwork format {cover.format_id} retains MHIF image size {retained_size}; "
+                                f"expected {len(encoded)}. Automatic correction is unsafe: {error}"
+                            ) from error
+                        corrected_sizes[cover.format_id] = len(encoded)
+                        retained_sizes[cover.format_id] = len(encoded)
+                        logger.info(
+                            "Automatically corrected retained MHIF image size during artwork preparation: format=%d old_size=%d new_size=%d",
+                            cover.format_id,
+                            retained_size,
+                            len(encoded),
+                        )
+                    if cover.format_id in file_sizes and file_sizes[
+                        cover.format_id
+                    ] != len(encoded):
+                        raise ValueError(
+                            "Artwork files require a consistent image size for each format."
+                        )
+                    decoded = decode_ithmb(encoded, layout)
+                    if (decoded.width, decoded.height) != (cover.width, cover.height):
+                        raise ValueError("Encoded artwork failed raster verification.")
+                    path, offset = append_image(cover.format_id, encoded)
+                    logger.debug(
+                        "Artwork encoded id=%d format=%d path=%r offset=%d bytes=%d",
+                        image_id,
+                        cover.format_id,
+                        path,
+                        offset,
+                        len(encoded),
+                    )
+                    file_sizes[cover.format_id] = len(encoded)
+                    prior_child = next(
+                        (
+                            c
+                            for c in templates
+                            if isinstance(c.payload, MhodContainerPayload)
+                            and c.payload.child.header.format_id == cover.format_id
+                        ),
+                        None,
+                    )
+                    location = (
+                        prior_child.payload.child
+                        if prior_child
+                        and isinstance(prior_child.payload, MhodContainerPayload)
+                        else new_artwork_chunk(MHNI, MhniHeader())
+                    )
+                    names = list(location.children)
+                    name_index = next(
+                        (
+                            i
+                            for i, c in enumerate(names)
+                            if isinstance(c.payload, MhodStringPayload)
+                            and isinstance(c.header, MhodHeader)
+                            and c.header.mhod_type == ArtworkMhodType.FILE_NAME
+                        ),
+                        None,
+                    )
+                    file_name = ":" + path.rsplit("/", 1)[-1]
+                    if name_index is None:
+                        names.append(
+                            new_string_mhod(ArtworkMhodType.FILE_NAME, file_name)
+                        )
+                    else:
+                        name_chunk = names[name_index]
+                        assert isinstance(name_chunk.payload, MhodStringPayload)
+                        names[name_index] = replace(
+                            name_chunk,
+                            payload=replace(name_chunk.payload, value=file_name),
+                        )
+                    location = replace(
+                        location,
+                        header=replace(
+                            location.header,
+                            format_id=cover.format_id,
+                            image_time_key=frame.display_time_ms,
+                            ithmb_offset=offset,
+                            image_size=len(encoded),
+                            image_size_2=len(encoded),
+                            image_width=cover.width,
+                            image_height=cover.height,
+                            horizontal_padding=0,
+                            vertical_padding=0,
+                        ),
+                        children=tuple(names),
+                    )
+                    if prior_child and isinstance(
+                        prior_child.payload, MhodContainerPayload
+                    ):
+                        replacement = replace(
+                            prior_child,
+                            payload=replace(prior_child.payload, child=location),
+                        )
+                        children.append(replacement)
+                    else:
+                        children.append(
+                            new_container_mhod(
+                                ArtworkMhodType.THUMBNAIL_IMAGE, location
+                            )
+                        )
+            children.extend(c for c in row.children if thumbnail_payload(c) is None)
+            if source_row is None and target.include_auxiliary_image_records:
+                children.append(new_auxiliary_mhod())
+            rows[image_id] = replace(
+                row,
+                header=replace(
+                    row.header,
+                    image_id=image_id,
+                    db_track_id_ref=0,
+                    source_image_size=zero_source_size(frames, source_rows),
+                ),
+                children=tuple(children),
+            )
+            resolved_assets[requested] = image_id
+            art_mappings.append(IdentityMapping("artwork", requested, image_id))
+        header_size = len(chunk.raw_header) or chunk.generic_header.header_length
+        direct_link = _ARTWORK_LINK.offset + _ARTWORK_LINK.size <= header_size
+        row = rows[image_id]
+        owner = chunk.header.db_track_id
+        if not owner:
+            raise ValueError("Artwork requires a nonzero Track database identity.")
+        if (
+            not direct_link or not target.supports_sparse_artwork
+        ) and row.header.db_track_id_ref not in (0, owner):
+            # Keep the other Track's image and pixels. This Track receives its
+            # own MHII identity and reverse link, sharing immutable byte ranges.
+            if sum(thumbnail_payload(c) is not None for c in row.children) > 0xFFFF:
+                raise ValueError("Artwork exceeds the native thumbnail count limit.")
+            image_id, next_id = next_id, next_id + 1
+            if next_id > 0xFFFFFFFF:
+                raise ValueError("Artwork identities are exhausted.")
+            row = replace(
+                row,
+                header=replace(row.header, image_id=image_id, db_track_id_ref=owner),
+            )
+            art_mappings.append(
+                IdentityMapping("artwork", requested, image_id, track_id=track.track_id)
+            )
+        elif not row.header.db_track_id_ref:
+            row = replace(row, header=replace(row.header, db_track_id_ref=owner))
+        rows[image_id] = row
+        item_count = checked_artwork_count(
+            len(
+                {
+                    payload.child.header.image_time_key
+                    for c in row.children
+                    if (payload := thumbnail_payload(c)) is not None
+                }
+            )
+        )
+        track_edits[id(chunk)] = replace(
+            chunk,
+            header=replace(
+                chunk.header,
+                artwork_id_ref=image_id if direct_link else 0,
+                # Distinct display times count source images, independently of formats.
+                artwork_count=item_count,
+                has_artwork=int(item_count > 0),
+                artwork_size=rows[image_id].header.source_image_size,
+            ),
+        )
+    itunes = rebuild(itunes, track_edits)
+    container = image_dataset.chunk.children[0]
+    remaining = dict(rows)
+    final_children = tuple(
+        remaining.pop(c.header.image_id) if isinstance(c.header, MhiiHeader) else c
+        for c in container.children
+    )
+    artwork = artwork.replace_chunk(
+        image_dataset,
+        replace(
+            image_dataset.chunk,
+            children=(
+                replace(container, children=(*final_children, *remaining.values())),
+            ),
+        ),
+    )
+    if art_mappings:
+        artwork = replace(artwork, header=replace(artwork.header, next_mhii_id=next_id))
+    file_dataset = next(
+        (
+            s
+            for s in artwork.find_chunks(MhsdHeader)
+            if s.chunk.header.dataset_type == 3
+        ),
+        None,
+    )
+    if file_dataset:
+        existing_formats = {
+            s.chunk.header.format_id for s in file_dataset.find_chunks(MhifHeader)
+        }
+        container = file_dataset.chunk.children[0]
+        for selection in container.find_chunks(MhifHeader):
+            size = corrected_sizes.get(selection.chunk.header.format_id)
+            if size is not None:
+                container = container.replace_chunk(
+                    selection,
+                    replace(
+                        selection.chunk,
+                        header=replace(selection.chunk.header, image_size=size),
+                    ),
+                )
+        for format_id, size in file_sizes.items():
+            if format_id not in existing_formats:
+                container = container.append_child(
+                    new_artwork_chunk(
+                        MHIF, MhifHeader(format_id=format_id, image_size=size)
+                    )
+                )
+        artwork = artwork.replace_chunk(
+            file_dataset, replace(file_dataset.chunk, children=(container,))
+        )
+    folded_inventory = {p.casefold(): f for p, f in inventory.items()}
+    folded_outputs = {p.casefold() for p in output_files}
+    for source_item in index.items:
+        for retained_location in source_item.locations:
+            if not output_files:
+                continue
+            retained_path = artwork_path(retained_location.file_name)
+            if retained_path.casefold() in folded_outputs:
+                dependency = folded_inventory.get(retained_path.casefold())
+                if (
+                    dependency is None
+                    or retained_location.offset + retained_location.byte_length
+                    > dependency.size
+                ):
+                    raise ValueError(
+                        f"A retained image range is outside the captured prefix of {retained_path}."
+                    )
+    return (
+        itunes,
+        artwork,
+        tuple(PreparedFile(path, data.finish()) for path, data in output_files.items()),
+        tuple(art_mappings),
+    )
+
+
+def aligned_offset(size: int, frame_size: int) -> int:
+    """Append complete fixed-size frames without changing a retained prefix."""
+    return ((size + frame_size - 1) // frame_size) * frame_size

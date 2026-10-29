@@ -1,0 +1,42 @@
+from iPodDB.PhotosDB.shared.chunk_defs.mhod_payloads.string_mhod import (
+    MhodStringPayload,
+    MhodStringPrefix,
+    decode_photos_string,
+)
+from iPodDB.shared.diagnostics import retain_unknown_bytes
+from iPodDB.shared.errors import UnknownMhodLayoutError
+from iPodDB.shared.types import MhodPayloadParseContext
+
+
+def parse_string_payload(
+    context: MhodPayloadParseContext[MhodStringPrefix],
+) -> MhodStringPayload:
+    prefix = context.prefix
+    string_end = context.payload_offset + prefix.string_byte_length
+
+    if string_end > context.payload_end:
+        raise ValueError(
+            f"PhotosDB MHOD type {int(context.mhod_type)} string length "
+            f"extends past its payload: {string_end:#x} > {context.payload_end:#x}"
+        )
+
+    raw = bytes(context.data[context.payload_offset : string_end])
+    if prefix.encoding_indicator not in (1, 2):
+        raise UnknownMhodLayoutError(f"string encoding {prefix.encoding_indicator}")
+    try:
+        value = decode_photos_string(raw, prefix.encoding_indicator)
+    except ValueError as error:
+        raise ValueError(
+            f"PhotosDB MHOD type {int(context.mhod_type)}: {error}"
+        ) from error
+
+    return MhodStringPayload(
+        value=value,
+        raw_value=raw,
+        trailing_data=retain_unknown_bytes(
+            context.data,
+            string_end,
+            context.payload_end,
+            f"MHOD {int(context.mhod_type)} string suffix",
+        ),
+    )

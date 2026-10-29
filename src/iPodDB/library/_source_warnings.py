@@ -1,0 +1,156 @@
+"""Report retained projection inconsistencies without treating display repairs as edits."""
+
+from dataclasses import replace
+
+from iPodDB.iTunesDB.shared.chunk_defs.mhbd import MhbdHeader
+from iPodDB.iTunesDB.shared.chunk_defs.mhip import MhipHeader
+from iPodDB.iTunesDB.shared.chunk_defs.mhsd import MhsdHeader
+from iPodDB.iTunesDB.shared.chunk_defs.mhyp import MhypHeader
+from iPodDB.library._playlist_datasets import structure_issues
+from iPodDB.library.models import LibrarySnapshot
+from iPodDB.library.writing import IssueSeverity, WriteIssue
+from iPodDB.shared.chunk import DatabaseDocument
+
+
+def _chapter_issue(code: str, message: str) -> WriteIssue:
+    return WriteIssue(
+        "source.chapter_" + code,
+        message,
+        IssueSeverity.WARNING,
+        "source",
+        "track",
+        field="metadata.chapters",
+    )
+
+
+def source_warnings(
+    document: DatabaseDocument[MhbdHeader], snapshot: LibrarySnapshot
+) -> tuple[WriteIssue, ...]:
+    issues: list[WriteIssue] = list(structure_issues(document))
+    datasets = document.find_chunks(MhsdHeader)
+    canonical = next(
+        (s for kind in (3, 2) for s in datasets if s.chunk.header.dataset_type == kind),
+        None,
+    )
+    playlists = {p.playlist_id: p for p in snapshot.playlists}
+    tracks = {t.track_id for t in snapshot.tracks}
+    chapter_issues = {
+        "duplicate_header": _chapter_issue(
+            "duplicate_header",
+            "Multiple retained Chapter headers are not interpreted by this native index view. "
+            "Editable Chapter metadata is retained.",
+        ),
+        "missing_header": _chapter_issue(
+            "missing_header",
+            "Chapter data has no header enabling the native named index. "
+            "Editable Chapter metadata is retained.",
+        ),
+        "navigation_disabled": _chapter_issue(
+            "navigation_disabled",
+            "The retained Chapter header disables the native named index. "
+            "Editable Chapter metadata is retained.",
+        ),
+        "unnamed_chapters": _chapter_issue(
+            "unnamed_chapters",
+            "Chapters without a name atom are omitted from the native named index. "
+            "Editable Chapter metadata is retained.",
+        ),
+        "unordered_starts": _chapter_issue(
+            "unordered_starts",
+            "The native Chapter index keeps stored order and stops at the first future start. "
+            "Editable Chapter metadata is retained.",
+        ),
+        "duplicate_starts": _chapter_issue(
+            "duplicate_starts",
+            "The native Chapter index selects the last eligible duplicate start. "
+            "Editable Chapter metadata is retained.",
+        ),
+    }
+    for track in snapshot.tracks:
+        if (
+            track.ipod is not None
+            and track.ipod.artwork_id_ref
+            and not track.artwork_id
+        ):
+            issues.append(
+                WriteIssue(
+                    "source.artwork_direct_id_unresolved",
+                    "The referenced artwork item is absent. A reverse-owner image "
+                    "is not substituted; the raw artwork reference is preserved.",
+                    IssueSeverity.WARNING,
+                    "source",
+                    "track",
+                    track.track_id,
+                    "artwork_id",
+                )
+            )
+        native = track.ipod.native_chapters if track.ipod is not None else None
+        if native is not None:
+            issues.extend(
+                replace(chapter_issues[code], record_id=track.track_id)
+                for code in native.diagnostics
+            )
+    issues.extend(
+        WriteIssue(
+            "source.playback_positions",
+            "The retained playback positions exceed this Track's duration. Unrelated edits preserve them.",
+            IssueSeverity.WARNING,
+            "source",
+            "track",
+            track.track_id,
+            "metadata.stop_time_ms",
+        )
+        for track in snapshot.tracks
+        if max(
+            track.metadata.start_time_ms,
+            track.metadata.stop_time_ms,
+            track.metadata.bookmark_time_ms,
+        )
+        > track.length_ms
+    )
+    if canonical:
+        for selection in canonical.find_chunks(MhypHeader):
+            header = selection.chunk.header
+            playlist = playlists.get(header.playlist_id)
+            if playlist is None:
+                continue
+            if (header.parent_folder_playlist_id or None) != playlist.parent_id:
+                issues.append(
+                    WriteIssue(
+                        "source.repaired_hierarchy",
+                        "The browser hides an invalid folder relationship. Its original bytes are retained unless that relationship is edited.",
+                        IssueSeverity.WARNING,
+                        "source",
+                        "playlist",
+                        playlist.playlist_id,
+                        "parent_id",
+                        offset=selection.chunk.offset,
+                    )
+                )
+            if any(
+                not item.chunk.header.is_group
+                and item.chunk.header.track_id not in tracks
+                for item in selection.find_chunks(MhipHeader)
+            ):
+                issues.append(
+                    WriteIssue(
+                        "source.unresolved_entries",
+                        "This Playlist has missing Track references hidden by the browser. Unaffected references will be retained.",
+                        IssueSeverity.WARNING,
+                        "source",
+                        "playlist",
+                        playlist.playlist_id,
+                        "entries",
+                        offset=selection.chunk.offset,
+                    )
+                )
+    if not -86400 < document.header.timezone_offset < 86400:
+        issues.append(
+            WriteIssue(
+                "source.invalid_timezone",
+                "The database header timezone is invalid. Preferences may still resolve local dates; the header will be retained unchanged.",
+                IssueSeverity.WARNING,
+                "source",
+            )
+        )
+    return tuple(issues)
