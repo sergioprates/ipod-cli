@@ -336,7 +336,10 @@ def add_tracks(
         print_info("Preparing iPod database transaction...")
         desired_snapshot = replace(lib.snapshot, tracks=(*lib.snapshot.tracks, *new_tracks))
         draft = lib.begin_draft(desired_snapshot)
-        write_target = WriteTarget(cover_formats=device.cover_formats)
+        write_target = WriteTarget(
+            cover_formats=device.cover_formats,
+            supports_sparse_artwork=device.supports_sparse_artwork,
+        )
         plan = lib.analyze(draft, target=write_target)
 
         # Collect existing .ithmb files for artwork inventory and sources

@@ -154,7 +154,10 @@ def set_artwork_cmd(
         )
         desired = replace(lib.snapshot, tracks=new_tracks)
         draft = lib.begin_draft(desired)
-        write_target = WriteTarget(cover_formats=device.cover_formats)
+        write_target = WriteTarget(
+            cover_formats=device.cover_formats,
+            supports_sparse_artwork=device.supports_sparse_artwork,
+        )
         plan = lib.analyze(draft, target=write_target)
 
         # 5. Collect existing .ithmb files
@@ -289,7 +292,27 @@ def sync_artwork_cmd(
                             pass
 
     # Determine candidate tracks
-    candidate_tracks = [t for t in tracks if (all_tracks or t.artwork_id <= 0)]
+    needs_full_recompile = all_tracks
+    if not needs_full_recompile and not device.supports_sparse_artwork:
+        artwork_db_path = target_mount / "iPod_Control" / "Artwork" / "ArtworkDB"
+        if artwork_db_path.exists():
+            try:
+                from iPodDB.ArtworkDB.parser.parse_ArtworkDB import parse_ArtworkDB
+                from iPodDB.ArtworkDB.shared.chunk_defs.mhii import MhiiHeader
+
+                parsed_art = parse_ArtworkDB(artwork_db_path.read_bytes())
+                mhii_count = len([s for s in parsed_art.find_chunks(MhiiHeader)])
+                tracks_with_art = sum(1 for t in tracks if t.artwork_id > 0)
+                if mhii_count < tracks_with_art:
+                    print_info(
+                        f"Non-sparse hardware detected ({device.model_name}): "
+                        f"recompiling individual track artwork links ({mhii_count} -> {tracks_with_art})..."
+                    )
+                    needs_full_recompile = True
+            except Exception:
+                pass
+
+    candidate_tracks = [t for t in tracks if (needs_full_recompile or t.artwork_id <= 0)]
     if not candidate_tracks:
         print_success("All tracks already have artwork registered in iPod database! (Use --all to force recompile).")
         return
@@ -408,7 +431,10 @@ def sync_artwork_cmd(
     )
     desired = replace(lib.snapshot, tracks=new_tracks)
     draft = lib.begin_draft(desired)
-    write_target = WriteTarget(cover_formats=device.cover_formats)
+    write_target = WriteTarget(
+        cover_formats=device.cover_formats,
+        supports_sparse_artwork=device.supports_sparse_artwork,
+    )
     plan = lib.analyze(draft, target=write_target)
 
     # Collect existing .ithmb files

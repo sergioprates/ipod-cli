@@ -51,6 +51,7 @@ class IPodDevice:
     supports_video: bool
     database_found: bool
     cover_formats: tuple[CoverFormat, ...] = ()
+    supports_sparse_artwork: bool = False
 
 
 def _find_case_insensitive_path(base: Path, *segments: str) -> Optional[Path]:
@@ -202,6 +203,7 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
     supports_alac = True
     supports_artwork = True
     supports_video = False
+    supports_sparse_artwork = False
 
     cover_formats: tuple[CoverFormat, ...] = ()
 
@@ -216,6 +218,7 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
         supports_alac = prof.capabilities.audio.supports_alac
         supports_artwork = prof.capabilities.artwork.supports_cover_art
         supports_video = prof.capabilities.video.supported
+        supports_sparse_artwork = prof.capabilities.artwork.supports_sparse_artwork
         if prof.capabilities.artwork.cover_formats:
             cover_formats = tuple(
                 CoverFormat(
@@ -303,4 +306,5 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
         supports_video=supports_video,
         database_found=database_found,
         cover_formats=cover_formats,
+        supports_sparse_artwork=supports_sparse_artwork,
     )

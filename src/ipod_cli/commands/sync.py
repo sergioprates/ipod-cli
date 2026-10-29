@@ -304,7 +304,10 @@ def sync_library(
 
         print_info("Validating and preparing iPod database...")
         draft = lib.begin_draft(desired_snapshot, delete_omissions=bool(tracks_to_delete))
-        write_target = WriteTarget(cover_formats=device.cover_formats)
+        write_target = WriteTarget(
+            cover_formats=device.cover_formats,
+            supports_sparse_artwork=device.supports_sparse_artwork,
+        )
         plan = lib.analyze(draft, target=write_target)
 
         # Collect existing .ithmb files for artwork inventory and sources
