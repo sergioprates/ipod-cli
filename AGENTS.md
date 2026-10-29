@@ -72,11 +72,17 @@ uv run ipod playlists show "Rock Hits" --json
 uv run ipod playlists show 12815454400400274375 --json
 ```
 
+### List videos as JSON:
+```bash
+uv run ipod video list --json
+```
+
 ### Safe Pre-execution Simulations:
 Always run with `--dry-run` before modifying disk state on physical hardware:
 ```bash
 # Preview what would be added and transcoded
 uv run ipod add ./new_music --dry-run
+uv run ipod video add ./movies/clip.mkv --dry-run
 
 # Preview sync diff (additions, deletions, in-sync counts)
 uv run ipod sync ./local_library --dry-run
@@ -145,12 +151,15 @@ When generating code, running commands, or modifying files:
    - Always verify that a pre-write backup exists in `ipod_backups/pre_sync/` and `iTunesDB.bak`.
 
 2. **Respect Physical Hardware Constraints (iPod Video 5.5th Gen)**:
-   - **Maximum sample rate**: 44,100 Hz (44.1kHz) or 48,000 Hz. Higher sample rates (88.2kHz, 96kHz, 192kHz) cause audio stuttering and hardware freeze.
-   - **Bit depth**: 16-bit PCM (`-sample_fmt s16p`). 24-bit audio is not supported by standard iPod firmware.
-   - **Faststart**: Always pass `-movflags +faststart` for M4A/ALAC so that the `moov` atom is placed at the front of the file. This allows playback to begin without spinning the mechanical drive for extra seeks.
+   - **Audio Sample rate**: 44,100 Hz (44.1kHz) or 48,000 Hz. Higher sample rates cause audio stuttering.
+   - **Audio Bit depth**: 16-bit PCM (`-sample_fmt s16p`). 24-bit audio is not supported by standard iPod firmware.
+   - **Faststart**: Always pass `-movflags +faststart` for M4A/ALAC/M4V so that the `moov` atom is placed at byte 0.
+   - **Video Codec**: Strictly H.264 Baseline Profile with `-profile:v baseline -level 1.3` (320x240) or `-level 3.0` (640x480).
+   - **Video Pixel Format**: Strictly 8-bit YUV 4:2:0 (`-pix_fmt yuv420p`). Other pixel formats (such as 4:4:4 or RGB) will fail on the iPod decoder.
+   - **Video Framerate & Bitrate**: Max 30 fps; video bitrate default 768 kbps (max 1500 kbps); AAC-LC audio up to 160 kbps 48 kHz stereo.
 
 3. **Database Preparation Protocol (`iPodDB.library`)**:
-   - To add a track:
+   - To add an audio track:
      1. Build `TrackMetadata` with `location="iPod_Control/Music/Fxx/XXXX.ext"`, `sample_rate_hz=44100`, and `file_format="M4A"` (or `"MP3"`).
      2. Build `Track(track_id=-idx, ...)` with negative ID.
      3. Build `PreparedMedia(track_id, FileDependency(...), ...)` using `prepared_audio()`.
@@ -159,6 +168,11 @@ When generating code, running commands, or modifying files:
      6. Call `plan = lib.analyze(draft)`.
      7. Call `res = lib.prepare(plan, WriteResources(media=..., pending_playback_sidecars=False))`.
      8. Verify `res.issues` is empty before committing.
+   - To add a video track:
+     1. Build `TrackMetadata` with `location="iPod_Control/Music/Fxx/XXXX.m4v"`, `sample_rate_hz=48000`, and `file_format="M4V"`.
+     2. Build `Track(track_id=-idx, media_types=(MediaType.VIDEO,), ...)` (or `MediaType.MUSIC_VIDEO` / `MediaType.TV_SHOW`).
+     3. Build `PreparedMedia` using `prepared_video(track_id, FileDependency(...), has_audio=True)`.
+     4. Commit via `lib.prepare()` and `commit_transaction()`.
    - To remove a track:
      - Always pass `lib.begin_draft(desired, delete_omissions=True)`. Without `delete_omissions=True`, the database validation will correctly flag a `draft.deletion_not_enabled` error.
 

@@ -1,4 +1,4 @@
-"""Audio metadata extraction and tag normalization with Mutagen."""
+"""Audio and video metadata extraction and tag normalization with Mutagen and FFprobe."""
 
 from __future__ import annotations
 
@@ -9,14 +9,15 @@ from pathlib import Path
 from typing import Optional
 
 import mutagen
-from mutagen.mp4 import MP4, MP4Cover
+from mutagen.mp4 import MP4
 
 from iPodDB.library.media import AudioEncoding
+from ipod_cli.transcode import is_video_file, probe_media_file
 
 
 @dataclass(frozen=True, slots=True)
 class AudioMetadata:
-    """Consolidated audio file metadata."""
+    """Consolidated media file metadata for audio and video tracks."""
 
     title: str
     artist: str
@@ -37,6 +38,11 @@ class AudioMetadata:
     encoding: AudioEncoding = AudioEncoding.ALAC
     sha256: str = ""
     artwork_data: Optional[bytes] = None
+    is_video: bool = False
+    show: str = ""
+    episode: str = ""
+    season_number: int = 0
+    episode_number: int = 0
 
 
 def _parse_track_disc(value: str) -> tuple[int, int]:
@@ -69,7 +75,7 @@ def _compute_sha256(path: Path) -> str:
 
 
 def extract_metadata(file_path: Path) -> AudioMetadata:
-    """Extract metadata from audio files (MP3, M4A, ALAC, WAV, FLAC, etc.)."""
+    """Extract metadata from audio or video files (MP3, M4A, M4V, FLAC, MKV, MP4, etc.)."""
     path = Path(file_path)
     size_bytes = path.stat().st_size
     sha256 = _compute_sha256(path)
@@ -89,12 +95,21 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
     bitrate_kbps = 256
     sample_rate_hz = 44100
     artwork_data: Optional[bytes] = None
+    is_video = is_video_file(path)
+    show = ""
+    episode = ""
+    season_number = 0
+    episode_number = 0
 
     ext = path.suffix.lower()
     file_format = "M4A"
     encoding = AudioEncoding.ALAC
 
-    if ext == ".mp3":
+    if is_video:
+        file_format = "M4V"
+        encoding = AudioEncoding.AAC
+        sample_rate_hz = 48000
+    elif ext == ".mp3":
         file_format = "MP3"
         encoding = AudioEncoding.MP3
     elif ext in (".wav", ".wave"):
@@ -131,7 +146,7 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
 
         tags = audio.tags
         if tags:
-            # MP4 / M4A / ALAC format
+            # MP4 / M4A / M4V format
             if isinstance(audio, MP4) or "©nam" in tags:
                 if "©nam" in tags and tags["©nam"]:
                     title = str(tags["©nam"][0])
@@ -158,6 +173,15 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
                 if "covr" in tags and tags["covr"]:
                     cov = tags["covr"][0]
                     artwork_data = bytes(cov)
+                # Video tags in MP4
+                if "tvsh" in tags and tags["tvsh"]:
+                    show = str(tags["tvsh"][0])
+                if "tven" in tags and tags["tven"]:
+                    episode = str(tags["tven"][0])
+                if "tvsn" in tags and tags["tvsn"]:
+                    season_number = int(tags["tvsn"][0])
+                if "tves" in tags and tags["tves"]:
+                    episode_number = int(tags["tves"][0])
 
             # ID3 / MP3 format
             elif hasattr(tags, "getall"):
@@ -185,7 +209,7 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
                 if pics:
                     artwork_data = bytes(pics[0].data)
 
-            # Vorbis / FLAC format
+            # Vorbis / FLAC / Matroska format
             else:
                 title = str(tags.get("title", [title])[0])
                 artist = str(tags.get("artist", [artist])[0])
@@ -199,10 +223,31 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
                 if hasattr(audio, "pictures") and audio.pictures:
                     artwork_data = bytes(audio.pictures[0].data)
 
+    # If mutagen could not read length (e.g. video files like MKV/AVI/WebM)
+    if length_ms == 0:
+        probe_info = probe_media_file(path)
+        if probe_info:
+            fmt = probe_info.get("format", {})
+            try:
+                if "duration" in fmt:
+                    length_ms = int(float(fmt["duration"]) * 1000)
+                if "bit_rate" in fmt:
+                    bitrate_kbps = int(int(fmt["bit_rate"]) / 1000)
+            except Exception:
+                pass
+
+            tags = fmt.get("tags", {})
+            if tags:
+                title = tags.get("title", title)
+                artist = tags.get("artist", artist)
+                album = tags.get("album", album)
+                if "date" in tags:
+                    year = _parse_year(tags["date"])
+
     return AudioMetadata(
         title=title.strip() or path.stem,
-        artist=artist.strip() or "Unknown Artist",
-        album=album.strip() or "Unknown Album",
+        artist=artist.strip() or ("Unknown Artist" if not is_video else "Unknown"),
+        album=album.strip() or ("Unknown Album" if not is_video else "Videos"),
         album_artist=album_artist.strip(),
         genre=genre.strip(),
         composer=composer.strip(),
@@ -214,9 +259,14 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
         length_ms=length_ms,
         size_bytes=size_bytes,
         bitrate_kbps=bitrate_kbps,
-        sample_rate_hz=sample_rate_hz or 44100,
+        sample_rate_hz=sample_rate_hz or 48000 if is_video else 44100,
         file_format=file_format,
         encoding=encoding,
         sha256=sha256,
         artwork_data=artwork_data,
+        is_video=is_video,
+        show=show,
+        episode=episode,
+        season_number=season_number,
+        episode_number=episode_number,
     )

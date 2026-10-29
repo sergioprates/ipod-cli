@@ -38,6 +38,19 @@ Formats such as **FLAC**, **OGG**, **OPUS**, **WMA**, **APE**, or files exceedin
 
 ---
 
+## 🎬 Video Profile (iPod 5.5th Gen / H.264 Baseline Decoder)
+
+For the iPod Video (5th / 5.5th Gen), `ipod-sync` includes a dedicated hardware-compliant video encoding pipeline:
+
+* **Video Codec**: H.264 Baseline Profile (`-c:v libx264 -profile:v baseline -level 1.3` for 320x240, or `-level 3.0` for 640x480).
+* **Pixel Format**: Strictly 8-bit YUV 4:2:0 (`-pix_fmt yuv420p`), required by the iPod hardware video decoder.
+* **Resolution & Aspect**: Defaults to 320x240 (native screen resolution) with aspect-ratio preserving letterboxing (`pad`), preventing distortion. 640x480 is also supported.
+* **Bitrates**: Video up to 1500 kbps (default 768 kbps) with 30 fps; AAC-LC audio up to 160 kbps, 48 kHz stereo.
+* **Container**: MP4 / M4V container with `-movflags +faststart` for instant playback initiation.
+* **Categories**: Automatically organizes into **Movies**, **Music Videos**, or **TV Shows** on the iPod.
+
+---
+
 ## 🛠️ CLI Command Reference
 
 ### 1. `ipod detect`
@@ -164,6 +177,29 @@ uv run ipod backup list
 
 # Restore a backup
 uv run ipod backup restore "ipod_backups/iPod_backup_20261029.zip"
+```
+
+### 10. `ipod video`
+Dedicated commands to convert and transfer video content (Movies, Music Videos, TV Shows) to the iPod.
+```bash
+# Convert any video locally to iPod 5.5 compatible H.264 Baseline M4V (320x240)
+uv run ipod video convert movie.mkv
+uv run ipod video convert concert.mp4 output_concert.m4v
+
+# Convert with custom settings (640x480, 1000kbps bitrate)
+uv run ipod video convert documentary.avi --res 640x480 --bitrate 1000
+
+# Transfer video directly to iPod as a Movie
+uv run ipod video add movie.mkv
+uv run ipod video add movie.mkv --title "My Movie" --dry-run
+
+# Transfer as Music Video or TV Show
+uv run ipod video add clip.mp4 --kind music-video --artist "Daft Punk"
+uv run ipod video add episode.mkv --kind tv-show --show "Breaking Bad" --season 1 --episode 1
+
+# List all videos present on the iPod
+uv run ipod video list
+uv run ipod video list --json
 ```
 
 ---

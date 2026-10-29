@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ipod_cli import __version__
-from ipod_cli.commands import add, backup, export, playlists, remove, sync, tracks
+from ipod_cli.commands import add, backup, export, playlists, remove, sync, tracks, video
 from ipod_cli.device import discover_ipod_mounts, inspect_ipod, is_ipod_mount
 from ipod_cli.ui import console, error_console, print_banner, print_error, print_info, print_success, print_warning
 
@@ -31,6 +31,7 @@ app.command(name="add")(add.add_tracks)
 app.command(name="remove")(remove.remove_tracks)
 app.command(name="sync")(sync.sync_library)
 app.add_typer(backup.app, name="backup")
+app.add_typer(video.app, name="video")
 
 
 def version_callback(value: bool) -> None:

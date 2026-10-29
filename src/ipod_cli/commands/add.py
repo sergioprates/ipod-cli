@@ -1,4 +1,4 @@
-"""Command for adding tracks to the iPod with automated audio conversion."""
+"""Command for adding tracks and videos to the iPod with automated conversion."""
 
 from __future__ import annotations
 
@@ -12,32 +12,41 @@ import typer
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
-from iPodDB.library.media import AudioEncoding, prepared_audio
-from iPodDB.library.models import Track, TrackMetadata
+from iPodDB.library.media import AudioEncoding, prepared_audio, prepared_video
+from iPodDB.library.models import MediaType, Track, TrackMetadata
 from iPodDB.library.writing import FileDependency, PreparedMedia, WriteResources
 from ipod_cli.allocator import MusicPathAllocator, count_music_directories
+from ipod_cli.commands.tracks import _format_duration
 from ipod_cli.device import discover_ipod_mounts, inspect_ipod, is_ipod_mount
 from ipod_cli.metadata import AudioMetadata, extract_metadata
 from ipod_cli.storage_ops import commit_transaction, load_ipod_library
-from ipod_cli.transcode import is_ffmpeg_available, needs_transcoding, transcode_to_alac
+from ipod_cli.transcode import (
+    SUPPORTED_VIDEO_EXTS,
+    is_ffmpeg_available,
+    is_video_file,
+    needs_transcoding,
+    transcode_to_alac,
+    transcode_video,
+)
 from ipod_cli.ui import console, print_error, print_info, print_success, print_warning
 
 SUPPORTED_AUDIO_EXTS = {
     ".mp3", ".m4a", ".aac", ".wav", ".aif", ".aiff",
-    ".flac", ".ogg", ".opus", ".wma", ".ape", ".wv"
+    ".flac", ".ogg", ".opus", ".wma", ".ape", ".wv",
 }
+SUPPORTED_MEDIA_EXTS = SUPPORTED_AUDIO_EXTS | SUPPORTED_VIDEO_EXTS
 
 
 def _collect_files(paths: list[str]) -> list[Path]:
-    """Collect all valid audio files from paths and directories."""
+    """Collect all valid audio and video files from paths and directories."""
     results: list[Path] = []
     for p_str in paths:
         p = Path(p_str)
-        if p.is_file() and p.suffix.lower() in SUPPORTED_AUDIO_EXTS:
+        if p.is_file() and p.suffix.lower() in SUPPORTED_MEDIA_EXTS:
             results.append(p.resolve())
         elif p.is_dir():
             for item in p.rglob("*"):
-                if item.is_file() and item.suffix.lower() in SUPPORTED_AUDIO_EXTS:
+                if item.is_file() and item.suffix.lower() in SUPPORTED_MEDIA_EXTS:
                     results.append(item.resolve())
     return sorted(list(set(results)))
 
@@ -45,7 +54,7 @@ def _collect_files(paths: list[str]) -> list[Path]:
 def add_tracks(
     paths: List[str] = typer.Argument(
         ...,
-        help="Audio files or directories to add to the iPod.",
+        help="Audio or video files or directories to add to the iPod.",
     ),
     mount_point: Optional[str] = typer.Option(
         None,
@@ -56,7 +65,24 @@ def add_tracks(
     force_alac: bool = typer.Option(
         False,
         "--force-alac",
-        help="Force conversion of all files to ALAC 44.1kHz (iPod 5.5 Wolfson DAC).",
+        help="Force conversion of all audio files to ALAC 44.1kHz (iPod 5.5 Wolfson DAC).",
+    ),
+    video_res: str = typer.Option(
+        "320x240",
+        "--video-res",
+        "--res",
+        help="Target video resolution for videos: '320x240' (native) or '640x480'.",
+    ),
+    video_bitrate: int = typer.Option(
+        768,
+        "--video-bitrate",
+        help="Video bitrate in kbps (default: 768, max: 1500).",
+    ),
+    video_kind: str = typer.Option(
+        "movie",
+        "--video-kind",
+        "-k",
+        help="Classification for video files: 'movie', 'music-video', or 'tv-show'.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -65,7 +91,7 @@ def add_tracks(
         help="Simulate track addition without copying files or modifying iPod.",
     ),
 ) -> None:
-    """Add audio tracks to iPod, automatically converting non-native formats."""
+    """Add audio tracks and videos to iPod, automatically converting non-native formats."""
     # 1. Resolve iPod mount
     target_mount: Optional[Path] = None
     if mount_point:
@@ -84,10 +110,10 @@ def add_tracks(
     # 2. Collect input files
     input_files = _collect_files(paths)
     if not input_files:
-        print_warning("No supported audio files found in provided paths.")
+        print_warning("No supported audio or video files found in provided paths.")
         raise typer.Exit(0)
 
-    print_info(f"Found [bold]{len(input_files)}[/bold] audio file(s) to process.")
+    print_info(f"Found [bold]{len(input_files)}[/bold] media file(s) to process.")
 
     # 3. Load iPod database
     try:
@@ -108,7 +134,16 @@ def add_tracks(
             key = (t.artist.casefold().strip(), t.album.casefold().strip())
             album_artwork_map[key] = t.artwork_id
 
-    # 5. Process audio files
+    # Resolve video classification
+    vkind_lower = video_kind.lower().strip()
+    if vkind_lower in ("music-video", "music_video", "mv"):
+        target_video_type = MediaType.MUSIC_VIDEO
+    elif vkind_lower in ("tv-show", "tv_show", "tv"):
+        target_video_type = MediaType.TV_SHOW
+    else:
+        target_video_type = MediaType.VIDEO
+
+    # 5. Process files
     temp_dir = Path(tempfile.mkdtemp(prefix="ipod_add_"))
     files_to_copy: list[tuple[Path, Path]] = []
     prepared_medias: list[PreparedMedia] = []
@@ -123,60 +158,108 @@ def add_tracks(
             TimeRemainingColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task("Processing tracks...", total=len(input_files))
+            task = progress.add_task("Processing media...", total=len(input_files))
 
             for idx, src_file in enumerate(input_files, start=1):
-                progress.update(task, description=f"[cyan]Processing ({idx}/{len(input_files)}):[/cyan] {src_file.name}")
-
-                should_transcode = force_alac or needs_transcoding(src_file)
-                process_file = src_file
-
-                if should_transcode:
-                    if not is_ffmpeg_available():
-                        print_error("FFmpeg not found in system PATH. Required for transcoding.")
-                        raise typer.Exit(1)
-                    alac_temp = temp_dir / f"{src_file.stem}_{idx}.m4a"
-                    transcode_to_alac(src_file, alac_temp)
-                    process_file = alac_temp
-
-                meta = extract_metadata(process_file)
-                ext = process_file.suffix.lstrip(".").lower()
-                ipod_rel_path = allocator.allocate(ext)
-                ipod_abs_dst = target_mount / ipod_rel_path.replace("/", os.sep)
-
-                album_key = (meta.artist.casefold().strip(), meta.album.casefold().strip())
-                inherited_artwork_id = album_artwork_map.get(album_key, 0)
+                is_video = is_video_file(src_file)
+                media_label = "video" if is_video else "audio"
+                progress.update(task, description=f"[cyan]Processing {media_label} ({idx}/{len(input_files)}):[/cyan] {src_file.name}")
 
                 temp_track_id = -idx
-                file_dep = FileDependency(ipod_rel_path, meta.size_bytes, meta.sha256)
-                media = prepared_audio(temp_track_id, file_dep, meta.encoding)
-                prepared_medias.append(media)
+                process_file = src_file
 
-                track_meta = TrackMetadata(
-                    location=ipod_rel_path,
-                    sample_rate_hz=meta.sample_rate_hz,
-                    file_format=meta.file_format,
-                    disc_number=meta.disc_number,
-                    total_discs=meta.total_discs,
-                    total_tracks=meta.total_tracks,
-                    composer=meta.composer,
-                )
+                if is_video:
+                    if needs_transcoding(src_file):
+                        if not is_ffmpeg_available():
+                            print_error("FFmpeg not found in system PATH. Required for video transcoding.")
+                            raise typer.Exit(1)
+                        vid_temp = temp_dir / f"vid_{idx}.m4v"
+                        transcode_video(
+                            source_path=src_file,
+                            output_path=vid_temp,
+                            resolution=video_res,
+                            video_bitrate_kbps=video_bitrate,
+                        )
+                        process_file = vid_temp
 
-                new_track = Track(
-                    track_id=temp_track_id,
-                    title=meta.title,
-                    artist=meta.artist,
-                    album=meta.album,
-                    album_artist=meta.album_artist,
-                    length_ms=meta.length_ms,
-                    size_bytes=meta.size_bytes,
-                    bitrate_kbps=meta.bitrate_kbps,
-                    year=meta.year,
-                    track_number=meta.track_number,
-                    genre=meta.genre,
-                    artwork_id=inherited_artwork_id,
-                    metadata=track_meta,
-                )
+                    meta = extract_metadata(process_file)
+                    ipod_rel_path = allocator.allocate("m4v")
+                    ipod_abs_dst = target_mount / ipod_rel_path.replace("/", os.sep)
+
+                    file_dep = FileDependency(ipod_rel_path, meta.size_bytes, meta.sha256)
+                    media = prepared_video(temp_track_id, file_dep, has_audio=True)
+                    prepared_medias.append(media)
+
+                    track_meta = TrackMetadata(
+                        location=ipod_rel_path,
+                        sample_rate_hz=48000,
+                        file_format="M4V",
+                    )
+
+                    new_track = Track(
+                        track_id=temp_track_id,
+                        title=meta.title or src_file.stem,
+                        artist=meta.artist,
+                        album=meta.album,
+                        album_artist=meta.album_artist,
+                        length_ms=meta.length_ms,
+                        size_bytes=meta.size_bytes,
+                        bitrate_kbps=video_bitrate or meta.bitrate_kbps,
+                        year=meta.year,
+                        media_types=(target_video_type,),
+                        show=meta.show,
+                        season_number=meta.season_number,
+                        episode_number=meta.episode_number,
+                        metadata=track_meta,
+                    )
+                else:
+                    should_transcode = force_alac or needs_transcoding(src_file)
+                    if should_transcode:
+                        if not is_ffmpeg_available():
+                            print_error("FFmpeg not found in system PATH. Required for transcoding.")
+                            raise typer.Exit(1)
+                        alac_temp = temp_dir / f"{src_file.stem}_{idx}.m4a"
+                        transcode_to_alac(src_file, alac_temp)
+                        process_file = alac_temp
+
+                    meta = extract_metadata(process_file)
+                    ext = process_file.suffix.lstrip(".").lower()
+                    ipod_rel_path = allocator.allocate(ext)
+                    ipod_abs_dst = target_mount / ipod_rel_path.replace("/", os.sep)
+
+                    album_key = (meta.artist.casefold().strip(), meta.album.casefold().strip())
+                    inherited_artwork_id = album_artwork_map.get(album_key, 0)
+
+                    file_dep = FileDependency(ipod_rel_path, meta.size_bytes, meta.sha256)
+                    media = prepared_audio(temp_track_id, file_dep, meta.encoding)
+                    prepared_medias.append(media)
+
+                    track_meta = TrackMetadata(
+                        location=ipod_rel_path,
+                        sample_rate_hz=meta.sample_rate_hz,
+                        file_format=meta.file_format,
+                        disc_number=meta.disc_number,
+                        total_discs=meta.total_discs,
+                        total_tracks=meta.total_tracks,
+                        composer=meta.composer,
+                    )
+
+                    new_track = Track(
+                        track_id=temp_track_id,
+                        title=meta.title,
+                        artist=meta.artist,
+                        album=meta.album,
+                        album_artist=meta.album_artist,
+                        length_ms=meta.length_ms,
+                        size_bytes=meta.size_bytes,
+                        bitrate_kbps=meta.bitrate_kbps,
+                        year=meta.year,
+                        track_number=meta.track_number,
+                        genre=meta.genre,
+                        artwork_id=inherited_artwork_id,
+                        metadata=track_meta,
+                    )
+
                 new_tracks.append(new_track)
                 files_to_copy.append((process_file, ipod_abs_dst))
                 progress.advance(task)
@@ -201,45 +284,47 @@ def add_tracks(
             print_error("Prepared library returned no output data.")
             raise typer.Exit(1)
 
-        # 7. Summary table
-        table = Table(title="Tracks Ready to Add", border_style="green")
-        table.add_column("#", justify="right", style="dim")
+        # 7. Show summary table
+        table = Table(title="Media to be Added to iPod", border_style="cyan")
+        table.add_column("Type", style="magenta")
         table.add_column("Title", style="bold white")
-        table.add_column("Artist", style="cyan")
-        table.add_column("Album", style="magenta")
-        table.add_column("Format", style="yellow")
-        table.add_column("iPod Destination", style="green")
+        table.add_column("Artist / Show", style="cyan")
+        table.add_column("Album", style="green")
+        table.add_column("Duration", justify="right")
+        table.add_column("Destination", style="dim")
 
-        for idx, t in enumerate(new_tracks, start=1):
+        for t in new_tracks:
+            m_type = "Video" if is_video_track(t) else "Audio"
             table.add_row(
-                str(idx),
+                m_type,
                 t.title,
-                t.artist,
+                t.show or t.artist,
                 t.album,
-                t.metadata.file_format,
-                t.metadata.location,
+                _format_duration(t.length_ms),
+                str(t.metadata.location),
             )
-
         console.print(table)
 
         if dry_run:
-            print_warning("[Dry Run Mode] No changes written to the iPod.")
+            print_info(f"[yellow]Simulation (--dry-run):[/yellow] {len(new_tracks)} item(s) validated successfully. No disk writes performed.")
             return
 
-        # 8. Transaction commit
-        clean_mount = str(target_mount).rstrip("/\\")
-        print_info(f"Copying files and committing database to iPod ({clean_mount})...")
+        # 8. Transactional commit
+        print_info(f"Copying {len(files_to_copy)} file(s) to iPod and updating database...")
         commit_transaction(
             target_mount,
             write_result.prepared.itunes,
-            files_to_copy,
+            files_to_copy=files_to_copy,
+            files_to_delete=[],
         )
 
-        print_success(
-            f"Success! [bold green]{len(new_tracks)}[/bold green] track(s) added to the iPod library!"
-        )
+        print_success(f"Success! [bold green]{len(new_tracks)}[/bold green] item(s) added to iPod library.")
 
     finally:
+        # Clean up temporary transcoding files
+        import shutil
         if temp_dir.exists():
-            import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
