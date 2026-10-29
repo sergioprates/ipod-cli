@@ -1,4 +1,4 @@
-"""Motor de sincronização inteligente de pasta local para o iPod."""
+"""Intelligent music library sync engine from local folders to the iPod."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ SUPPORTED_AUDIO_EXTS = {
 
 
 def _norm(text: str) -> str:
-    """Normaliza texto para comparação flexível."""
+    """Normalize text for resilient string comparison."""
     return "".join(c for c in text.casefold() if c.isalnum() or c.isspace()).strip()
 
 
 def sync_library(
     source_dir: Path = typer.Argument(
         ...,
-        help="Pasta local no computador contendo os arquivos de música a sincronizar.",
+        help="Local computer directory containing music files to synchronize.",
         exists=True,
         file_okay=False,
         dir_okay=True,
@@ -46,77 +46,78 @@ def sync_library(
         None,
         "--mount",
         "-m",
-        help="Letra da unidade ou ponto de montagem do iPod.",
+        help="iPod mount point or drive letter (e.g. 'D:\\').",
     ),
     delete: bool = typer.Option(
         False,
         "--delete",
-        help="Remove do iPod músicas que não existem mais na pasta local de origem.",
+        help="Remove tracks from iPod that are no longer present in the local directory.",
     ),
     force_alac: bool = typer.Option(
         False,
         "--force-alac",
-        help="Força transcodificação de todas as músicas locais para ALAC 44.1kHz.",
+        help="Force conversion of all local tracks to ALAC 44.1kHz.",
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
         "-n",
-        help="Simula a sincronização sem alterar o iPod.",
+        help="Simulate synchronization without applying changes to the iPod.",
     ),
     yes: bool = typer.Option(
         False,
         "--yes",
         "-y",
-        help="Executa a sincronização sem solicitar confirmação interativa.",
+        help="Confirm synchronization non-interactively.",
     ),
 ) -> None:
-    """Sincroniza uma pasta de músicas local com o iPod de forma inteligente."""
-    # 1. Ponto de montagem
+    """Synchronize a local music folder with the iPod intelligently."""
+    # 1. Resolve iPod mount
     target_mount: Optional[Path] = None
     if mount_point:
         p = Path(mount_point)
         if not is_ipod_mount(p):
-            print_error(f"O caminho '{mount_point}' não é um iPod válido.")
+            print_error(f"The path '{mount_point}' is not a valid iPod.")
             raise typer.Exit(1)
         target_mount = p
     else:
         mounts = discover_ipod_mounts()
         if not mounts:
-            print_error("Nenhum iPod detectado automaticamente.")
+            print_error("No iPod detected automatically.")
             raise typer.Exit(1)
         target_mount = mounts[0]
 
-    # 2. Carrega biblioteca do iPod
+    # 2. Load iPod library
     clean_mount = str(target_mount).rstrip("/\\")
-    print_info(f"Lendo biblioteca do iPod em [bold]{clean_mount}[/bold]...")
+    print_info(f"Reading iPod library on [bold]{clean_mount}[/bold]...")
     try:
         lib = load_ipod_library(target_mount)
     except Exception as e:
-        print_error(f"Erro ao carregar iPod: {e}")
+        print_error(f"Failed to load iPod library: {e}")
         raise typer.Exit(1)
 
     ipod_tracks = lib.snapshot.tracks
-    # Cria índice por (artista, título)
+    # Create lookup index by (artist, title)
     ipod_index: dict[tuple[str, str], Track] = {}
     for t in ipod_tracks:
         key = (_norm(t.artist), _norm(t.title))
         ipod_index[key] = t
 
-    # 3. Escaneia pasta local
-    print_info(f"Escaneando pasta local [bold]{source_dir}[/bold]...")
+    # 3. Scan local directory
+    clean_source = str(source_dir).rstrip("/\\")
+    print_info(f"Scanning local directory [bold]{clean_source}[/bold]...")
     local_files: list[Path] = []
     for item in source_dir.rglob("*"):
         if item.is_file() and item.suffix.lower() in SUPPORTED_AUDIO_EXTS:
             local_files.append(item.resolve())
 
     if not local_files:
-        print_warning(f"Nenhum arquivo de áudio suportado encontrado em '{source_dir}'.")
+        print_warning(f"No supported audio files found in '{source_dir}'.")
         raise typer.Exit(0)
 
-    print_info(f"Encontrados [bold]{len(local_files)}[/bold] arquivos de áudio na pasta local.")
+    print_info(f"Found [bold]{len(local_files)}[/bold] audio file(s) in local directory.")
 
-    # 4. Compara biblioteca local com iPod
+    # 4. Compare local collection against iPod
     files_to_add: list[Path] = []
     matched_ipod_ids: set[int] = set()
 
@@ -135,51 +136,51 @@ def sync_library(
     if delete:
         tracks_to_delete = [t for t in ipod_tracks if t.track_id not in matched_ipod_ids]
 
-    # 5. Tabela de ações
-    summary_table = Table(title="Resumo do Plano de Sincronização", border_style="cyan")
-    summary_table.add_column("Operação", style="bold")
-    summary_table.add_column("Quantidade", justify="right", style="bold")
-    summary_table.add_column("Descrição")
+    # 5. Summary plan table
+    summary_table = Table(title="Synchronization Plan Summary", border_style="cyan")
+    summary_table.add_column("Operation", style="bold")
+    summary_table.add_column("Count", justify="right", style="bold")
+    summary_table.add_column("Description")
 
     summary_table.add_row(
-        "[green]+ Adicionar[/green]",
+        "[green]+ Add[/green]",
         str(len(files_to_add)),
-        "Músicas locais novas a copiar/converter para o iPod",
+        "New local tracks to copy/convert to iPod",
     )
     if delete:
         summary_table.add_row(
-            "[red]- Remover[/red]",
+            "[red]- Remove[/red]",
             str(len(tracks_to_delete)),
-            "Músicas no iPod que não estão mais na pasta local",
+            "Tracks on iPod no longer present locally",
         )
     else:
         summary_table.add_row(
-            "[dim]= Preservar[/dim]",
+            "[dim]= Preserve[/dim]",
             str(len(ipod_tracks) - len(matched_ipod_ids)),
-            "Músicas extras no iPod mantidas (use --delete para remover)",
+            "Extra tracks on iPod kept (pass --delete to remove)",
         )
     summary_table.add_row(
-        "[blue]= Sincronizadas[/blue]",
+        "[blue]= In Sync[/blue]",
         str(len(matched_ipod_ids)),
-        "Músicas que já estão sincronizadas",
+        "Tracks already in sync",
     )
 
     console.print(summary_table)
 
     if not files_to_add and not tracks_to_delete:
-        print_success("A biblioteca do iPod já está perfeitamente sincronizada!")
+        print_success("iPod library is already perfectly in sync!")
         return
 
     if dry_run:
-        print_warning("[Modo Simulação] Nenhuma alteração aplicada.")
+        print_warning("[Dry Run Mode] No changes applied.")
         return
 
     if not yes:
-        if not typer.confirm("Deseja aplicar a sincronização no iPod?", default=True):
-            print_info("Sincronização cancelada.")
+        if not typer.confirm("Apply synchronization changes to the iPod?", default=True):
+            print_info("Synchronization cancelled by user.")
             return
 
-    # 6. Alocador e estruturas de dados
+    # 6. Set up allocator
     existing_locations = [t.metadata.location for t in ipod_tracks if t.metadata.location]
     dir_count = count_music_directories(target_mount)
     allocator = MusicPathAllocator(directory_count=dir_count, occupied_paths=existing_locations)
@@ -190,7 +191,7 @@ def sync_library(
     new_tracks: list[Track] = []
 
     try:
-        # Processamento das adições
+        # Process additions
         if files_to_add:
             with Progress(
                 SpinnerColumn(),
@@ -200,17 +201,17 @@ def sync_library(
                 TimeRemainingColumn(),
                 console=console,
             ) as progress:
-                task = progress.add_task("Processando novas músicas...", total=len(files_to_add))
+                task = progress.add_task("Processing new tracks...", total=len(files_to_add))
 
                 for idx, src_file in enumerate(files_to_add, start=1):
-                    progress.update(task, description=f"[cyan]Preparando ({idx}/{len(files_to_add)}):[/cyan] {src_file.name}")
+                    progress.update(task, description=f"[cyan]Preparing ({idx}/{len(files_to_add)}):[/cyan] {src_file.name}")
 
                     should_transcode = force_alac or needs_transcoding(src_file)
                     process_file = src_file
 
                     if should_transcode:
                         if not is_ffmpeg_available():
-                            print_error("FFmpeg não encontrado no sistema. Necessário para transcodificação.")
+                            print_error("FFmpeg not found in system PATH. Required for transcoding.")
                             raise typer.Exit(1)
                         alac_temp = temp_dir / f"{src_file.stem}_{idx}.m4a"
                         transcode_to_alac(src_file, alac_temp)
@@ -255,12 +256,12 @@ def sync_library(
                     files_to_copy.append((process_file, ipod_abs_dst))
                     progress.advance(task)
 
-        # Prepara snapshot desejado
+        # Prepare desired snapshot
         delete_ids = {t.track_id for t in tracks_to_delete}
         base_tracks = tuple(t for t in ipod_tracks if t.track_id not in delete_ids)
         desired_snapshot = replace(lib.snapshot, tracks=(*base_tracks, *new_tracks))
 
-        print_info("Validando e preparando dados do iPod...")
+        print_info("Validating and preparing iPod database...")
         draft = lib.begin_draft(desired_snapshot, delete_omissions=bool(tracks_to_delete))
         plan = lib.analyze(draft)
         write_result = lib.prepare(
@@ -269,23 +270,23 @@ def sync_library(
         )
 
         if write_result.issues:
-            print_error(f"Validação da sincronização falhou com {len(write_result.issues)} problema(s):")
+            print_error(f"Sync validation failed with {len(write_result.issues)} issue(s):")
             for issue in write_result.issues:
                 console.print(f"  [red]• {issue.code}[/red]: {issue.message} ({issue.detail or ''})")
             raise typer.Exit(1)
 
         if write_result.prepared is None:
-            print_error("A biblioteca preparada não retornou dados.")
+            print_error("Prepared library returned no output data.")
             raise typer.Exit(1)
 
-        # Arquivos a apagar
+        # Physical files to delete
         files_to_delete: list[Path] = []
         for t in tracks_to_delete:
             if t.metadata.location:
                 files_to_delete.append(target_mount / t.metadata.location.replace("/", os.sep))
 
-        # Commit transacional
-        print_info(f"Gravando sincronização no iPod ({target_mount})...")
+        # Transaction commit
+        print_info(f"Committing synchronization to iPod ({clean_mount})...")
         commit_transaction(
             target_mount,
             write_result.prepared.itunes,
@@ -294,9 +295,9 @@ def sync_library(
         )
 
         print_success(
-            f"Sincronização concluída com sucesso! "
-            f"[bold green]+{len(new_tracks)}[/bold green] adicionada(s), "
-            f"[bold red]-{len(tracks_to_delete)}[/bold red] removida(s)."
+            f"Synchronization completed successfully! "
+            f"[bold green]+{len(new_tracks)}[/bold green] added, "
+            f"[bold red]-{len(tracks_to_delete)}[/bold red] removed."
         )
 
     finally:

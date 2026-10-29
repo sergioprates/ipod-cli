@@ -1,11 +1,11 @@
-"""Utilitários de terminal e UI visual baseados na biblioteca Rich."""
+"""Terminal UI utilities powered by the Rich library."""
 
 import sys
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-# Garante suporte adequado a UTF-8 nos terminais Windows (cp1252 / cmd / powershell)
+# Ensure proper UTF-8 support on Windows terminals (cp1252 / cmd / powershell)
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -23,10 +23,10 @@ error_console = Console(stderr=True, force_terminal=True if sys.stderr.isatty() 
 
 
 def print_banner() -> None:
-    """Exibe o cabeçalho estilizado do ipod-sync."""
+    """Print the styled ipod-sync header banner."""
     text = (
         "[bold cyan]iPod Sync CLI[/bold cyan] [dim]v0.1.0[/dim]\n"
-        "[italic white]Gerenciamento e sincronização de iPods sem iTunes[/italic white]"
+        "[italic white]High-performance iPod management without iTunes[/italic white]"
     )
     console.print(Panel(text, border_style="cyan", expand=False))
 

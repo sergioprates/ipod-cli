@@ -1,4 +1,4 @@
-"""Comando para consulta e listagem de faixas da biblioteca do iPod."""
+"""Command for querying and listing tracks in the iPod library."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from ipod_cli.device import discover_ipod_mounts, inspect_ipod, is_ipod_mount
 from ipod_cli.ui import console, print_banner, print_error, print_info, print_warning
 from iPodDB.library import IPodLibrary
 
-app = typer.Typer(name="tracks", help="Consulta e gerencia músicas da biblioteca do iPod.")
+app = typer.Typer(name="tracks", help="Query and list tracks from the iPod library.")
 
 
 def _format_duration(ms: int) -> str:
-    """Converte milissegundos para formato MM:SS."""
+    """Format duration from milliseconds to MM:SS."""
     seconds = ms // 1000
     minutes = seconds // 60
     secs = seconds % 60
@@ -25,20 +25,20 @@ def _format_duration(ms: int) -> str:
 
 
 def _load_library(mount_point: Optional[str]) -> tuple[Path, IPodLibrary]:
-    """Descobre o iPod e carrega o objeto IPodLibrary."""
+    """Discover the iPod mount point and load the IPodLibrary instance."""
     target_mount: Optional[Path] = None
 
     if mount_point:
         p = Path(mount_point)
         if not p.exists() or not is_ipod_mount(p):
-            print_error(f"O caminho especificado não é um iPod válido: '{mount_point}'")
+            print_error(f"The specified path is not a valid iPod mount: '{mount_point}'")
             raise typer.Exit(1)
         target_mount = p
     else:
         mounts = discover_ipod_mounts()
         if not mounts:
-            print_error("Nenhum iPod detectado automaticamente.")
-            console.print("[dim]Use [bold]--mount <caminho>[/bold] (ex: -m D:\\) para informar o ponto de montagem.[/dim]")
+            print_error("No iPod detected automatically.")
+            console.print("[dim]Use [bold]--mount <path>[/bold] (e.g. -m D:\\) to specify the iPod drive.[/dim]")
             raise typer.Exit(1)
         target_mount = mounts[0]
 
@@ -53,7 +53,7 @@ def _load_library(mount_point: Optional[str]) -> tuple[Path, IPodLibrary]:
             break
 
     if not itunesdb_path:
-        print_error(f"Banco de dados 'iTunesDB' não encontrado em '{target_mount}'.")
+        print_error(f"Database 'iTunesDB' not found on '{target_mount}'.")
         raise typer.Exit(1)
 
     try:
@@ -61,7 +61,7 @@ def _load_library(mount_point: Optional[str]) -> tuple[Path, IPodLibrary]:
         library = IPodLibrary(db_bytes)
         return target_mount, library
     except Exception as e:
-        print_error(f"Erro ao analisar a biblioteca do iPod: {e}")
+        print_error(f"Failed to parse iPod library: {e}")
         raise typer.Exit(1)
 
 
@@ -70,44 +70,43 @@ def list_tracks(
         None,
         "--mount",
         "-m",
-        help="Letra ou caminho de montagem do iPod (ex: 'D:\\').",
+        help="iPod mount point or drive letter (e.g. 'D:\\').",
     ),
-
     search: Optional[str] = typer.Option(
         None,
         "--search",
         "-s",
-        help="Filtra faixas por busca de texto (título, artista ou álbum).",
+        help="Filter tracks by free text search (title, artist, or album).",
     ),
     artist: Optional[str] = typer.Option(
         None,
         "--artist",
         "-a",
-        help="Filtra faixas pelo nome do artista.",
+        help="Filter tracks by artist name.",
     ),
     album: Optional[str] = typer.Option(
         None,
         "--album",
         "-b",
-        help="Filtra faixas pelo nome do álbum.",
+        help="Filter tracks by album name.",
     ),
     limit: int = typer.Option(
         30,
         "--limit",
         "-n",
-        help="Número máximo de faixas a exibir (use 0 para listar todas).",
+        help="Maximum number of tracks to display (use 0 for all).",
     ),
     as_json: bool = typer.Option(
         False,
         "--json",
-        help="Gera saída em JSON estruturado.",
+        help="Output tracks as structured JSON.",
     ),
 ) -> None:
-    """Lista as músicas presentes no banco de dados do iPod com opções de filtro."""
+    """List tracks in the iPod database with filtering options."""
     mount_path, library = _load_library(mount_point)
     all_tracks = library.snapshot.tracks
 
-    # Filtros
+    # Filters
     filtered = all_tracks
     if search:
         q = search.lower()
@@ -149,26 +148,26 @@ def list_tracks(
 
     print_banner()
     clean_mount = str(mount_path).rstrip("/\\")
-    print_info(f"Biblioteca de [bold]{clean_mount}[/bold] ({len(all_tracks)} faixas no total):")
+    print_info(f"Library on [bold]{clean_mount}[/bold] ({len(all_tracks)} tracks total):")
 
     if not displayed:
-        print_warning("Nenhuma faixa correspondeu aos filtros aplicados.")
+        print_warning("No tracks matched the applied filters.")
         return
 
-    table = Table(title=f"Músicas no iPod ({len(displayed)} de {total_matches} encontradas)", border_style="cyan")
+    table = Table(title=f"iPod Tracks ({len(displayed)} of {total_matches} shown)", border_style="cyan")
     table.add_column("ID", justify="right", style="dim")
-    table.add_column("Título", style="bold white", no_wrap=True)
-    table.add_column("Artista", style="bold cyan")
-    table.add_column("Álbum", style="italic")
-    table.add_column("Duração", justify="right", style="green")
-    table.add_column("Ano", justify="right", style="dim")
-    table.add_column("Taxa", justify="right", style="magenta")
+    table.add_column("Title", style="bold white", no_wrap=True)
+    table.add_column("Artist", style="bold cyan")
+    table.add_column("Album", style="italic")
+    table.add_column("Duration", justify="right", style="green")
+    table.add_column("Year", justify="right", style="dim")
+    table.add_column("Bitrate", justify="right", style="magenta")
 
     for t in displayed:
         table.add_row(
             str(t.track_id),
-            t.title or "[Sem Título]",
-            t.artist or "[Desconhecido]",
+            t.title or "[Untitled]",
+            t.artist or "[Unknown]",
             t.album or "-",
             _format_duration(t.length_ms),
             str(t.year) if t.year else "-",
@@ -177,4 +176,4 @@ def list_tracks(
 
     console.print(table)
     if limit > 0 and total_matches > limit:
-        console.print(f"[dim]Exibindo as primeiras {limit} músicas. Use [bold]--limit 0[/bold] para exibir todas as {total_matches}.[/dim]\n")
+        console.print(f"[dim]Showing first {limit} tracks. Use [bold]--limit 0[/bold] to display all {total_matches}.[/dim]\n")

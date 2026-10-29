@@ -1,152 +1,157 @@
 # ipod-sync
 
-CLI moderna, de alta fidelidade e 100% headless para gerenciar e sincronizar músicas no seu iPod (Classic, Video 5th/5.5th, Mini, Nano) no terminal, sem precisar do iTunes.
+A modern, high-fidelity, and 100% headless command-line interface for managing and synchronizing music on iPod devices (Classic, Video 5th/5.5th Gen, Mini, Nano) directly from your terminal—without iTunes.
 
-Baseado na engenharia de baixo nível do [iOpenPod](https://github.com/TheRealSavi/iOpenPod) — com parsing e escrita nativa de `iTunesDB`, `ArtworkDB` e integridade transacional de disco, mas sem dependências gráficas pesadas (PySide6/Qt removidos).
+Built on the low-level database engine of [TheRealSavi/iOpenPod](https://github.com/TheRealSavi/iOpenPod) — featuring native binary parsing and serialization for `iTunesDB`, `ArtworkDB`, and transactional disk integrity, but completely free of GUI and desktop dependencies (PySide6 / Qt removed).
 
 ---
 
-## ⚡ Guia Rápido (Quickstart com `uv`)
+## ⚡ Quickstart (with `uv`)
 
-O projeto foi estruturado para ser imediatamente utilizável por qualquer usuário ou agente (ex: Hermes) sem precisar configurar Python ou ambientes virtuais manualmente:
+The project is structured to run immediately via [`uv`](https://docs.astral.sh/uv/) without manual virtualenv creation or dependency management:
 
 ```bash
-# 1. Clonar o repositório
+# 1. Clone the repository
 git clone https://github.com/sergioprates/ipod-cli.git
 cd ipod-cli
 
-# 2. Executar comandos diretamente com uv
+# 2. Run CLI commands directly with uv
 uv run ipod detect
 uv run ipod info
 uv run ipod tracks
 ```
 
-*(Ou usando instalação tradicional com `pip install -e .`)*
+*(Alternatively, install in editable mode with traditional pip: `pip install -e .`)*
 
 ---
 
-## 🎧 Perfil Audiófilo (iPod 5.5th Gen / Wolfson WM8758 DAC)
+## 🎧 Audiophile Profile (iPod 5.5th Gen / Wolfson WM8758 DAC)
 
-Para o iPod Video 5.5th Gen (equipado com o lendário conversor analógico-digital Wolfson WM8758), o `ipod-sync` implementa transcodificação de máxima fidelidade via FFmpeg:
+For the iPod Video 5.5th Gen (celebrated for its Wolfson WM8758 digital-to-analog converter), `ipod-sync` includes a high-fidelity transcoding pipeline powered by FFmpeg:
 
-* **Codec**: Apple Lossless (`-c:a alac`) em 16-bit PCM (`-sample_fmt s16p`).
-* **Taxa de Amostragem**: 44.100 Hz com resampler de altíssima precisão **SoX** (`aresample=resampler=soxr`) e fallback automático para SWR de alta qualidade.
-* **Metadados e Capas**: Preservação integral de tags ID3/MP4 e capa de álbum no container M4A (`-c:v copy -disposition:v attached_pic`).
-* **Disco & Buffer**: Flag `-movflags +faststart` para mover o átomo `moov` para o início do arquivo, eliminando atrasos no giro do disco do iPod.
+* **Audio Codec**: Apple Lossless (`-c:a alac`) in 16-bit PCM (`-sample_fmt s16p`).
+* **Sampling Rate**: 44,100 Hz with high-precision **SoX** resampling (`aresample=resampler=soxr`) and automatic fallback to high-quality SWR.
+* **Metadata & Cover Art**: Full preservation of ID3/MP4 tags and embedded album art within the M4A container (`-c:v copy -disposition:v attached_pic`).
+* **Spin-up Optimization**: `-movflags +faststart` moves the `moov` header atom to the beginning of the file, preventing hard drive spin-up lag during playback.
 
-Formatos como **FLAC**, **OGG**, **OPUS**, **WMA**, **APE** ou arquivos com taxa > 44.1kHz são automaticamente detectados e transcodificados antes do envio.
+Formats such as **FLAC**, **OGG**, **OPUS**, **WMA**, **APE**, or files exceeding 44.1kHz/16-bit are automatically detected and converted before transfer.
 
 ---
 
-## 🛠️ Referência de Comandos
+## 🛠️ CLI Command Reference
 
 ### 1. `ipod detect`
-Varre as portas USB e unidades montadas, identificando iPods conectados com 100% de precisão via SCSI VPD e verificação de hardware.
+Scans USB buses and system mount points, identifying connected iPods with 100% precision using SCSI VPD hardware probing.
 ```bash
 uv run ipod detect
 ```
 
 ### 2. `ipod info`
-Exibe relatório detalhado de hardware, modelo exato (ex: iPod Video 30GB Preto MA446), número de série, versão de firmware, espaço em disco e estatísticas da biblioteca.
+Displays hardware specifications, exact catalog model (e.g. iPod 5.5th Gen 30GB Black MA446), serial number, firmware version, partition storage, and library statistics.
 ```bash
 uv run ipod info
 uv run ipod info -m D:\
 ```
 
 ### 3. `ipod tracks`
-Lista as faixas do iPod no terminal em formato de tabela estilizada ou JSON.
+Lists tracks stored in the iPod database with filtering options and structured JSON export.
 ```bash
-# Listar as primeiras 20 faixas
+# List first 20 tracks
 uv run ipod tracks --limit 20
 
-# Filtrar por artista ou álbum
-uv run ipod tracks --artist "Ariana Grande"
-uv run ipod tracks --album "thank u, next"
+# Filter by artist or album
+uv run ipod tracks --artist "Daft Punk"
+uv run ipod tracks --album "Discovery"
 
-# Busca textual geral
+# Full-text search
 uv run ipod tracks --search "love"
 
-# Exportar lista em JSON
-uv run ipod tracks --json > faixas.json
+# Export library to JSON
+uv run ipod tracks --json > tracks.json
 ```
 
 ### 4. `ipod playlists`
-Lista todas as playlists configuradas na biblioteca do iPod.
+Lists all user and smart playlists existing in the iPod library.
 ```bash
 uv run ipod playlists
+uv run ipod playlists --json
 ```
 
 ### 5. `ipod export`
-Extrai as músicas do iPod recuperando seus nomes originais e organizando em pastas `Artista/Álbum/01 - Faixa.ext`.
+Extracts audio tracks from the iPod, reconstructing original filenames and folder structures: `Artist/Album/01 - Title.ext`.
 ```bash
-# Simulação prévia
-uv run ipod export ./musicas_recuperadas --artist "Ariana Grande" --dry-run
+# Dry run simulation
+uv run ipod export ./recovered_music --artist "Ariana Grande" --dry-run
 
-# Extração real
-uv run ipod export ./musicas_recuperadas --artist "Ariana Grande"
+# Perform extraction
+uv run ipod export ./recovered_music --artist "Ariana Grande"
 ```
 
 ### 6. `ipod add`
-Adiciona faixas ou pastas inteiras de música ao iPod, com transcodificação automática se necessário.
+Adds individual tracks or entire folders to the iPod, transcoding non-native formats automatically.
 ```bash
-# Adicionar arquivo individual (com simulação prévia)
-uv run ipod add ./musicas/album/faixa.flac --dry-run
+# Add a single audio file (with preview)
+uv run ipod add ./album/track.flac --dry-run
 
-# Adicionar pasta inteira convertendo tudo para ALAC 44.1kHz
-uv run ipod add ./minha_colecao --force-alac
+# Add an entire folder, converting all tracks to ALAC 44.1kHz
+uv run ipod add ./music_collection --force-alac
 
-# Adicionar arquivos nativos (MP3, M4A, etc.)
-uv run ipod add ./novas_musicas/
+# Add native files (MP3, M4A, etc.) directly
+uv run ipod add ./new_tracks/
 ```
 
 ### 7. `ipod remove`
-Remove músicas da biblioteca do iPod e apaga seus arquivos físicos das pastas internas `Fxx/`.
+Removes tracks from the iPod library and deletes their corresponding physical files inside `iPod_Control/Music/Fxx/`.
 ```bash
-# Remover por ID
+# Remove by track ID
 uv run ipod remove 780 781
 
-# Remover por busca textual (com confirmação)
-uv run ipod remove --search "Artista Desconhecido"
+# Remove by search query (prompts for confirmation)
+uv run ipod remove --search "Old Album"
 
-# Simular remoção sem apagar nada
-uv run ipod remove --search "Album Antigo" --dry-run
+# Non-interactive removal
+uv run ipod remove --search "Old Album" --yes
+
+# Dry run preview
+uv run ipod remove --search "Old Album" --dry-run
 ```
 
 ### 8. `ipod sync`
-Sincroniza uma pasta local de músicas com o iPod, adicionando faixas novas e opcionalmente removendo as que foram excluídas localmente.
+Synchronizes a local music directory with the iPod, adding new tracks and optionally removing omitted ones.
 ```bash
-# Simulação prévia do plano de sincronização
-uv run ipod sync "C:\Users\Usuario\Music" --dry-run
+# Dry run simulation of sync plan
+uv run ipod sync "C:\Users\User\Music" --dry-run
 
-# Sincronização real
-uv run ipod sync "C:\Users\Usuario\Music"
+# Synchronize local tracks to iPod
+uv run ipod sync "C:\Users\User\Music"
 
-# Sincronização espelhada (remove do iPod o que não existe localmente)
-uv run ipod sync "C:\Users\Usuario\Music" --delete
+# Mirror synchronization (deletes tracks on iPod that were removed locally)
+uv run ipod sync "C:\Users\User\Music" --delete
 ```
 
 ### 9. `ipod backup`
-Gerencia cópias de segurança do banco de dados `iTunesDB` e arquivos do sistema do iPod.
+Manages backups of the iPod's `iTunesDB` and device control folders.
 ```bash
-# Criar backup completo
-uv run ipod backup create
+# Create a full backup archive
+uv run ipod backup
 
-# Listar backups existentes
+# List available local backups
 uv run ipod backup list
 
-# Restaurar um backup
+# Restore a backup
 uv run ipod backup restore "ipod_backups/iPod_backup_20261029.zip"
 ```
 
 ---
 
-## 🔒 Segurança de Dados & Transações Atômicas
+## 🔒 Data Integrity & Atomic Transactions
 
-* Toda operação de escrita (`add`, `remove`, `sync`) gera automaticamente uma cópia de segurança (`iTunesDB.bak` no iPod e arquivo versionado em `ipod_backups/pre_sync/`).
-* A substituição do banco de dados é feita de forma atômica via arquivo temporário `iTunesDB.tmp`, garantindo que um desligamento inesperado nunca corrompa o disco do iPod.
+* **Pre-write Safety Backups**: Every write operation (`add`, `remove`, `sync`) automatically creates a timestamped backup (`iTunesDB.bak` on the iPod and a copy in `ipod_backups/pre_sync/`).
+* **Atomic Replacement**: Database updates are written to `iTunesDB.tmp` and atomically replaced, ensuring unexpected disconnections never corrupt the iPod partition.
+* **Path Allocation**: The `MusicPathAllocator` guarantees collision-free filenames conforming to the `F00-F49` 4-character uppercase FAT32 structure.
 
 ---
 
-## 📜 Licença
+## 📜 License
 
-GPL-3.0-or-later — consulte o arquivo [LICENSE](LICENSE) para detalhes completos.
+GPL-3.0-or-later — see [LICENSE](LICENSE) for details.

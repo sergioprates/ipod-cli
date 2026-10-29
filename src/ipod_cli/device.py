@@ -1,4 +1,4 @@
-"""Módulo de detecção e inspeção de iPods conectados."""
+"""iPod hardware detection and device inspection module."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ _IPOD_VPD_PLAN = ScsiVpdPagePlan(
 
 @dataclass
 class IPodDevice:
-    """Informações consolidadas de um iPod detectado."""
+    """Consolidated hardware and library metadata for a detected iPod."""
 
     mount_point: Path
     volume_label: str
@@ -51,7 +51,7 @@ class IPodDevice:
 
 
 def _find_case_insensitive_path(base: Path, *segments: str) -> Optional[Path]:
-    """Resolve caminhos no disco de forma insensível a maiúsculas/minúsculas."""
+    """Resolve directory segments case-insensitively across platforms."""
     current = base
     for seg in segments:
         if not current.exists() or not current.is_dir():
@@ -72,7 +72,7 @@ def _find_case_insensitive_path(base: Path, *segments: str) -> Optional[Path]:
 
 
 def is_ipod_mount(path: Path) -> bool:
-    """Verifica se um determinado caminho contém a estrutura de um iPod."""
+    """Check if the given directory contains an iPod_Control directory."""
     if not path.exists() or not path.is_dir():
         return False
     control_dir = _find_case_insensitive_path(path, "iPod_Control")
@@ -80,11 +80,11 @@ def is_ipod_mount(path: Path) -> bool:
 
 
 def discover_ipod_mounts() -> list[Path]:
-    """Descobre todos os pontos de montagem que correspondem a um iPod."""
+    """Discover all connected mounts that correspond to an iPod device."""
     mounts: list[Path] = []
     seen_paths: set[str] = set()
 
-    # 1. Utiliza a camada de Storage multiplataforma
+    # 1. Use the cross-platform Storage layer
     try:
         storage = Storage()
         result = storage.discover()
@@ -97,7 +97,7 @@ def discover_ipod_mounts() -> list[Path]:
     except Exception:
         pass
 
-    # 2. No Windows, verifica letras de unidade (caso o iPod não tenha a flag Removable)
+    # 2. On Windows, scan drive letters directly in case removable flag is unset
     if sys.platform == "win32":
         for letter in string.ascii_uppercase:
             drive_path = Path(f"{letter}:\\")
@@ -111,7 +111,7 @@ def discover_ipod_mounts() -> list[Path]:
             except (PermissionError, OSError):
                 continue
 
-    # 3. No macOS, verifica /Volumes
+    # 3. On macOS, scan /Volumes
     if sys.platform == "darwin":
         volumes_dir = Path("/Volumes")
         if volumes_dir.exists():
@@ -120,7 +120,7 @@ def discover_ipod_mounts() -> list[Path]:
                 if canon not in seen_paths and is_ipod_mount(child):
                     seen_paths.add(canon)
                     mounts.append(child)
-    # 4. No Linux, verifica /media e /run/media
+    # 4. On Linux, scan /media and /run/media
     elif sys.platform.startswith("linux"):
         for base in (Path("/media"), Path("/run/media")):
             if base.exists():
@@ -135,12 +135,12 @@ def discover_ipod_mounts() -> list[Path]:
 
 
 def inspect_ipod(mount_path: Path) -> IPodDevice:
-    """Inspeciona um ponto de montagem do iPod e extrai todos os dados de hardware e biblioteca."""
+    """Inspect an iPod mount point and extract hardware, firmware, and library details."""
     control_dir = _find_case_insensitive_path(mount_path, "iPod_Control")
     if control_dir is None:
-        raise ValueError(f"O diretório 'iPod_Control' não foi encontrado em '{mount_path}'.")
+        raise ValueError(f"Directory 'iPod_Control' was not found on '{mount_path}'.")
 
-    # Espaço em disco
+    # Disk usage
     try:
         usage = shutil.disk_usage(mount_path)
         total_b, free_b = usage.total, usage.free
@@ -150,7 +150,7 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
 
     evidence = DeviceEvidence()
 
-    # 1. Leitura de SysInfo em disco
+    # 1. Read SysInfo on disk
     sysinfo_path = _find_case_insensitive_path(control_dir, "Device", "SysInfo")
     if sysinfo_path and sysinfo_path.exists():
         try:
@@ -159,7 +159,7 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
         except Exception:
             pass
 
-    # 2. Sonda de hardware SCSI VPD direto no dispositivo (recupera payload estendido se SysInfo for básico)
+    # 2. Hardware SCSI VPD probe directly on storage volume
     try:
         storage = Storage()
         discovered = storage.discover()
@@ -174,7 +174,6 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
                 if observation.vendor_payload:
                     evidence = evidence.merged_with(parse_sysinfo_extended(observation.vendor_payload))
                 elif observation.unit_serial:
-                    # Serial direto da sonda SCSI
                     from device_registry.identifiers import normalize_serial
                     from device_registry.models import DeviceIdentifier, EvidenceAuthority
                     norm = normalize_serial(observation.unit_serial)
@@ -189,11 +188,11 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
     except Exception:
         pass
 
-    # 3. Identificação no catálogo oficial
+    # 3. Match against the official catalog
     model_number = ""
     serial_number = ""
     firmware_version = ""
-    model_name = "iPod (Desconhecido)"
+    model_name = "iPod (Unknown)"
     family = "iPod"
     generation = ""
     finish = ""
@@ -220,7 +219,7 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
     if evidence.firmware_versions:
         firmware_version = evidence.firmware_versions[0].value
 
-    # 4. Leitura do banco de dados iTunesDB
+    # 4. Read iTunesDB database
     itunes_dir = _find_case_insensitive_path(control_dir, "iTunes")
     itunesdb_path = None
     if itunes_dir:

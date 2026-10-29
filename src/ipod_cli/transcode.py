@@ -1,7 +1,8 @@
-"""Módulo de conversão e transcodificação de áudio otimizado para iPod 5.5 (Video)."""
+"""Audio conversion and transcoding pipeline optimized for iPod 5.5 (Video)."""
 
 from __future__ import annotations
 
+import functools
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ class TranscodeResult:
 
 
 def check_ffmpeg() -> bool:
-    """Verifica se o FFmpeg está instalado e disponível no PATH."""
+    """Check if FFmpeg is installed and available in system PATH."""
     return shutil.which("ffmpeg") is not None
 
 
@@ -47,12 +48,12 @@ is_ffmpeg_available = check_ffmpeg
 
 
 def needs_transcoding(file_path: Path) -> bool:
-    """Verifica se o arquivo de áudio necessita de conversão para o iPod 5.5."""
+    """Determine whether an audio file requires transcoding for iPod 5.5."""
     ext = file_path.suffix.lower()
     if ext in _CONVERTIBLE_EXTENSIONS:
         return True
 
-    # Para .m4a e .mp3, verifica se a taxa de amostragem ultrapassa 44.1kHz ou 48kHz
+    # For .m4a and .mp3, verify sample rate does not exceed 44.1kHz or 16-bit
     if ext in (".m4a", ".alac", ".wav"):
         try:
             import mutagen
@@ -60,7 +61,6 @@ def needs_transcoding(file_path: Path) -> bool:
             if audio is not None and hasattr(audio.info, "sample_rate"):
                 if audio.info.sample_rate > 44100:
                     return True
-                # Arquivos de 24-bit ou superior causam engasgo no iPod 5.5
                 if getattr(audio.info, "bits_per_sample", 16) > 16:
                     return True
         except Exception:
@@ -69,12 +69,9 @@ def needs_transcoding(file_path: Path) -> bool:
     return False
 
 
-import functools
-
-
 @functools.lru_cache(maxsize=1)
 def check_soxr_support() -> bool:
-    """Verifica se o FFmpeg instalado possui suporte ao resampler libsoxr."""
+    """Check if the installed FFmpeg build supports the libsoxr resampler."""
     try:
         res = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=0.01", "-af", "aresample=resampler=soxr", "-f", "null", "-"],
@@ -92,16 +89,16 @@ def transcode_to_alac(
     *,
     sample_rate: int = 44100,
 ) -> TranscodeResult:
-    """Converte um arquivo de áudio para ALAC 44.1kHz 16-bit com resampler SoX."""
+    """Convert an audio file to ALAC 44.1kHz 16-bit with high-quality resampling."""
     if not check_ffmpeg():
-        raise RuntimeError("FFmpeg não foi encontrado no PATH. Instale o FFmpeg para habilitar a conversão.")
+        raise RuntimeError("FFmpeg was not found in PATH. Install FFmpeg to enable audio conversion.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     has_soxr = check_soxr_support()
     resample_filter = "aresample=resampler=soxr" if has_soxr else f"aresample=osr={sample_rate}"
 
-    # Pipeline de alta fidelidade para iPod 5.5 (DAC Wolfson WM8758)
+    # Audiophile pipeline for iPod 5.5 (Wolfson WM8758 DAC)
     cmd = [
         "ffmpeg",
         "-y",
@@ -124,7 +121,7 @@ def transcode_to_alac(
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError:
-        # Fallback se a capa do vídeo original não puder ser copiada diretamente
+        # Fallback if original embedded video/cover stream cannot be copied directly
         fallback_cmd = [
             "ffmpeg",
             "-y",

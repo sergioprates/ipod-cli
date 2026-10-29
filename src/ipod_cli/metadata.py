@@ -1,4 +1,4 @@
-"""Extração e normalização de metadados de áudio com Mutagen."""
+"""Audio metadata extraction and tag normalization with Mutagen."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from iPodDB.library.media import AudioEncoding
 
 @dataclass(frozen=True, slots=True)
 class AudioMetadata:
-    """Metadados extraídos de um arquivo de áudio."""
+    """Consolidated audio file metadata."""
 
     title: str
     artist: str
@@ -40,7 +40,7 @@ class AudioMetadata:
 
 
 def _parse_track_disc(value: str) -> tuple[int, int]:
-    """Interpreta números como '3' ou '3/12'."""
+    """Parse track or disc representations such as '3' or '3/12'."""
     if not value:
         return 0, 0
     match = re.match(r"(\d+)(?:/(\d+))?", str(value).strip())
@@ -52,7 +52,7 @@ def _parse_track_disc(value: str) -> tuple[int, int]:
 
 
 def _parse_year(value: str) -> int:
-    """Extrai o ano de 4 dígitos (ex: '2024-05-10' -> 2024)."""
+    """Extract a 4-digit release year (e.g. '2024-05-10' -> 2024)."""
     if not value:
         return 0
     match = re.search(r"\b(\d{4})\b", str(value))
@@ -60,7 +60,7 @@ def _parse_year(value: str) -> int:
 
 
 def _compute_sha256(path: Path) -> str:
-    """Calcula hash SHA-256 do arquivo."""
+    """Calculate the SHA-256 hash of a file."""
     hasher = hashlib.sha256()
     with open(path, "rb") as f:
         while chunk := f.read(131072):
@@ -69,14 +69,14 @@ def _compute_sha256(path: Path) -> str:
 
 
 def extract_metadata(file_path: Path) -> AudioMetadata:
-    """Extrai metadados completos de um arquivo MP3, M4A, ALAC, WAV, etc."""
+    """Extract metadata from audio files (MP3, M4A, ALAC, WAV, FLAC, etc.)."""
     path = Path(file_path)
     size_bytes = path.stat().st_size
     sha256 = _compute_sha256(path)
 
     title = path.stem
-    artist = "Desconhecido"
-    album = "Álbum Desconhecido"
+    artist = "Unknown Artist"
+    album = "Unknown Album"
     album_artist = ""
     genre = ""
     composer = ""
@@ -105,10 +105,8 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
         encoding = AudioEncoding.AIFF
     elif ext in (".m4a", ".mp4", ".m4b", ".alac"):
         file_format = "M4A"
-        # Mutagen MP4 identifica se é ALAC ou AAC
         try:
             mp4 = MP4(path)
-            # Se o codec for alac nos átomos
             atoms = mp4.pprint()
             if "alac" in atoms.lower():
                 encoding = AudioEncoding.ALAC
@@ -133,7 +131,7 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
 
         tags = audio.tags
         if tags:
-            # Formato MP4 / M4A / ALAC
+            # MP4 / M4A / ALAC format
             if isinstance(audio, MP4) or "©nam" in tags:
                 if "©nam" in tags and tags["©nam"]:
                     title = str(tags["©nam"][0])
@@ -161,7 +159,7 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
                     cov = tags["covr"][0]
                     artwork_data = bytes(cov)
 
-            # Formato ID3 / MP3
+            # ID3 / MP3 format
             elif hasattr(tags, "getall"):
                 if "TIT2" in tags:
                     title = str(tags["TIT2"].text[0])
@@ -187,7 +185,7 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
                 if pics:
                     artwork_data = bytes(pics[0].data)
 
-            # Formato Vorbis / FLAC (caso tenha sido transcrito mantendo tags)
+            # Vorbis / FLAC format
             else:
                 title = str(tags.get("title", [title])[0])
                 artist = str(tags.get("artist", [artist])[0])
@@ -203,8 +201,8 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
 
     return AudioMetadata(
         title=title.strip() or path.stem,
-        artist=artist.strip() or "Desconhecido",
-        album=album.strip() or "Álbum Desconhecido",
+        artist=artist.strip() or "Unknown Artist",
+        album=album.strip() or "Unknown Album",
         album_artist=album_artist.strip(),
         genre=genre.strip(),
         composer=composer.strip(),

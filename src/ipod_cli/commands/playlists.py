@@ -1,4 +1,4 @@
-"""Comando para consulta e listagem de playlists do iPod."""
+"""Command for querying and listing playlists on the iPod."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from rich.table import Table
 from ipod_cli.commands.tracks import _load_library
 from ipod_cli.ui import console, print_banner, print_info, print_warning
 
-app = typer.Typer(name="playlists", help="Consulta e gerencia playlists no iPod.")
+app = typer.Typer(name="playlists", help="Query and list playlists on the iPod.")
 
 
 def list_playlists(
@@ -20,17 +20,15 @@ def list_playlists(
         None,
         "--mount",
         "-m",
-        help="Letra ou caminho de montagem do iPod (ex: 'D:\\').",
+        help="iPod mount point or drive letter (e.g. 'D:\\').",
     ),
     as_json: bool = typer.Option(
         False,
         "--json",
-        help="Gera saída em JSON estruturado.",
+        help="Output playlists as structured JSON.",
     ),
 ) -> None:
-    """Lista as playlists existentes na biblioteca do iPod."""
-
-
+    """List playlists existing in the iPod library."""
     mount_path, library = _load_library(mount_point)
     playlists = library.snapshot.playlists
 
@@ -50,29 +48,30 @@ def list_playlists(
         return
 
     print_banner()
-    print_info(f"Playlists encontradas em [bold]{mount_path}[/bold] ({len(playlists)} no total):")
+    clean_mount = str(mount_path).rstrip("/\\")
+    print_info(f"Playlists found on [bold]{clean_mount}[/bold] ({len(playlists)} total):")
 
     if not playlists:
-        print_warning("Nenhuma playlist encontrada na biblioteca.")
+        print_warning("No playlists found in the library.")
         return
 
-    table = Table(title="Playlists no iPod", border_style="cyan")
+    table = Table(title="iPod Playlists", border_style="cyan")
     table.add_column("ID", justify="right", style="dim")
-    table.add_column("Nome da Playlist", style="bold white")
-    table.add_column("Tipo", style="cyan")
-    table.add_column("Músicas", justify="right", style="magenta")
+    table.add_column("Playlist Name", style="bold white")
+    table.add_column("Type", style="cyan")
+    table.add_column("Tracks", justify="right", style="magenta")
 
     for p in playlists:
-        tipo = p.kind.value.capitalize()
+        kind_str = p.kind.value.capitalize()
         if p.smart:
-            tipo += " (Smart)"
+            kind_str += " (Smart)"
         if p.system_managed:
-            tipo += " [dim](Sistema)[/dim]"
+            kind_str += " [dim](System)[/dim]"
 
         table.add_row(
             str(p.playlist_id),
-            p.name or "[Sem Nome]",
-            tipo,
+            p.name or "[Untitled]",
+            kind_str,
             str(len(p.entries)),
         )
 

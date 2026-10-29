@@ -1,4 +1,4 @@
-"""Operações seguras e transacionais de leitura e gravação no iPod."""
+"""Safe transactional read and write operations for iPod storage."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_ipod_paths(mount_point: Path) -> dict[str, Path]:
-    """Retorna os caminhos fundamentais de controle do iPod."""
+    """Return core structural paths for an iPod mount."""
     control = mount_point / "iPod_Control"
     return {
         "control": control,
@@ -32,13 +32,13 @@ def get_ipod_paths(mount_point: Path) -> dict[str, Path]:
 
 
 def load_ipod_library(mount_point: Path) -> IPodLibrary:
-    """Carrega o IPodLibrary a partir do ponto de montagem do iPod."""
+    """Load the IPodLibrary from an iPod mount point."""
     paths = get_ipod_paths(mount_point)
     itunes_file = paths["itunesdb"]
 
     if not itunes_file.exists():
         raise FileNotFoundError(
-            f"Banco de dados iTunesDB não encontrado em '{itunes_file}'."
+            f"iTunesDB database file not found at '{itunes_file}'."
         )
 
     itunes_data = itunes_file.read_bytes()
@@ -49,13 +49,13 @@ def load_ipod_library(mount_point: Path) -> IPodLibrary:
         try:
             lib = lib.with_artwork(artwork_file.read_bytes())
         except Exception as e:
-            logger.warning("Não foi possível carregar ArtworkDB: %s", e)
+            logger.warning("Could not load ArtworkDB: %s", e)
 
     return lib
 
 
 def save_pre_write_backup(mount_point: Path) -> Path:
-    """Cria um backup rápido do iTunesDB antes de qualquer escrita."""
+    """Create a fast automated backup of iTunesDB prior to any write."""
     paths = get_ipod_paths(mount_point)
     itunes_file = paths["itunesdb"]
 
@@ -67,7 +67,7 @@ def save_pre_write_backup(mount_point: Path) -> Path:
     if itunes_file.exists():
         shutil.copy2(itunes_file, bak_dest)
 
-    # Mantém também um .bak direto no iPod
+    # Also maintain a .bak directly on the iPod filesystem
     ipod_bak = itunes_file.with_name("iTunesDB.bak")
     try:
         shutil.copy2(itunes_file, ipod_bak)
@@ -83,15 +83,15 @@ def commit_transaction(
     files_to_copy: list[tuple[Path, Path]],  # (src_local, dst_ipod)
     files_to_delete: list[Path] | None = None,
 ) -> None:
-    """Aplica as alterações fisicamente e com segurança transacional no iPod."""
+    """Commit changes to the iPod using transactional atomic file operations."""
     paths = get_ipod_paths(mount_point)
     itunes_file = paths["itunesdb"]
     itunes_tmp = itunes_file.with_name("iTunesDB.tmp")
 
-    # 1. Faz backup automático preventivo
+    # 1. Automatic pre-write backup
     save_pre_write_backup(mount_point)
 
-    # 2. Copia arquivos novos para as pastas Fxx
+    # 2. Copy new audio files into destination Fxx directories
     copied_successfully: list[Path] = []
     try:
         for src, dst in files_to_copy:
@@ -99,32 +99,31 @@ def commit_transaction(
             shutil.copy2(src, dst)
             copied_successfully.append(dst)
 
-        # 3. Grava o novo iTunesDB em arquivo temporário
+        # 3. Write new iTunesDB into temporary file
         itunes_tmp.write_bytes(prepared_itunes)
 
-        # 4. Substitui o iTunesDB atômica/seguramente
+        # 4. Atomically replace the existing iTunesDB
         if itunes_tmp.exists():
-            # No Windows FAT32, replace substitui o arquivo de destino
             itunes_tmp.replace(itunes_file)
 
-        # 5. Remove arquivos excluídos fisicamente (se houver)
+        # 5. Physically delete removed tracks (if requested)
         if files_to_delete:
             for f in files_to_delete:
                 if f.exists() and f.is_file():
                     try:
                         f.unlink()
                     except Exception as e:
-                        logger.warning("Falha ao remover arquivo %s: %s", f, e)
+                        logger.warning("Failed to delete file %s: %s", f, e)
 
     except Exception as exc:
-        print_error(f"Erro durante a gravação no iPod: {exc}")
-        # Rollback: se o temporário ainda existir, remove
+        print_error(f"Error while committing changes to iPod: {exc}")
+        # Rollback: remove temporary file if present
         if itunes_tmp.exists():
             try:
                 itunes_tmp.unlink()
             except Exception:
                 pass
-        # Remove arquivos copiados nesta transação que falhou
+        # Remove newly copied files from the failed transaction
         for copied in copied_successfully:
             if copied.exists():
                 try:
