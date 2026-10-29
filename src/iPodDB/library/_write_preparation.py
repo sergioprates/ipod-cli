@@ -673,6 +673,13 @@ def _verify_desired_snapshot(
                 for f in fields(actual)
                 if getattr(actual, f.name) != getattr(expected, f.name)
             )
+            detail_msgs = []
+            if actual.metadata != expected.metadata:
+                for f in fields(actual.metadata):
+                    va = getattr(actual.metadata, f.name)
+                    ve = getattr(expected.metadata, f.name)
+                    if va != ve:
+                        detail_msgs.append(f"{f.name}: expected {ve!r} != actual {va!r}")
             issues.append(
                 WriteIssue(
                     "verification.track_mismatch",
@@ -681,6 +688,7 @@ def _verify_desired_snapshot(
                     subject="track",
                     record_id=wanted.track_id,
                     field=differing,
+                    detail="; ".join(detail_msgs),
                 )
             )
     if len(actual_tracks) != len(desired.tracks):

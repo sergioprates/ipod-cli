@@ -43,3 +43,6 @@ Thumbs.db
 # Temporary reference clone
 repo-temp/
 scratch/
+
+# Local iPod device backups
+ipod_backups/

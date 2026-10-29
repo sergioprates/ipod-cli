@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ipod_cli import __version__
-from ipod_cli.commands import export, playlists, tracks
+from ipod_cli.commands import add, backup, export, playlists, remove, sync, tracks
 from ipod_cli.device import discover_ipod_mounts, inspect_ipod, is_ipod_mount
 from ipod_cli.ui import console, error_console, print_banner, print_error, print_info, print_success, print_warning
 
@@ -27,6 +27,11 @@ app = typer.Typer(
 app.command(name="tracks")(tracks.list_tracks)
 app.command(name="playlists")(playlists.list_playlists)
 app.command(name="export")(export.export_tracks)
+app.command(name="add")(add.add_tracks)
+app.command(name="remove")(remove.remove_tracks)
+app.command(name="sync")(sync.sync_library)
+app.add_typer(backup.app, name="backup")
+
 
 
 
@@ -144,7 +149,8 @@ def info_cmd(
             raise typer.Exit(1)
         target_mount = mounts[0]
 
-    print_info(f"Inspecionando iPod em [bold]{target_mount}[/bold]...")
+    clean_mount = str(target_mount).rstrip("/\\")
+    print_info(f"Inspecionando iPod em [bold]{clean_mount}[/bold]...")
 
     try:
         dev = inspect_ipod(target_mount)
