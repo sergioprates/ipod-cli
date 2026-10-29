@@ -148,7 +148,8 @@ def list_tracks(
         return
 
     print_banner()
-    print_info(f"Biblioteca de [bold]{mount_path}[/bold] ({len(all_tracks)} faixas no total):")
+    clean_mount = str(mount_path).rstrip("/\\")
+    print_info(f"Biblioteca de [bold]{clean_mount}[/bold] ({len(all_tracks)} faixas no total):")
 
     if not displayed:
         print_warning("Nenhuma faixa correspondeu aos filtros aplicados.")
