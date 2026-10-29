@@ -2,21 +2,32 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
+from PIL import Image
 import typer
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
+from iPodDB.library.artwork import ArtworkPixels
 from iPodDB.library.media import prepared_audio
 from iPodDB.library.models import Track, TrackMetadata
-from iPodDB.library.writing import FileDependency, PreparedMedia, WriteResources
+from iPodDB.library.writing import (
+    ArtworkAsset,
+    FileDependency,
+    PreparedMedia,
+    SourceFile,
+    WriteResources,
+    WriteTarget,
+)
 from ipod_cli.allocator import MusicPathAllocator, count_music_directories
-from ipod_cli.device import discover_ipod_mounts, is_ipod_mount
+from ipod_cli.device import discover_ipod_mounts, inspect_ipod, is_ipod_mount
 from ipod_cli.metadata import AudioMetadata, extract_metadata
 from ipod_cli.storage_ops import commit_transaction, load_ipod_library
 from ipod_cli.transcode import is_ffmpeg_available, needs_transcoding, transcode_to_alac
@@ -96,12 +107,17 @@ def sync_library(
         print_error(f"Failed to load iPod library: {e}")
         raise typer.Exit(1)
 
+    device = inspect_ipod(target_mount)
     ipod_tracks = lib.snapshot.tracks
     # Create lookup index by (artist, title)
     ipod_index: dict[tuple[str, str], Track] = {}
+    album_artwork_map: dict[tuple[str, str], int] = {}
     for t in ipod_tracks:
         key = (_norm(t.artist), _norm(t.title))
         ipod_index[key] = t
+        if t.artwork_id > 0 and t.album:
+            alb_key = (t.artist.casefold().strip(), t.album.casefold().strip())
+            album_artwork_map[alb_key] = t.artwork_id
 
     # 3. Scan local directory
     clean_source = str(source_dir).rstrip("/\\")
@@ -188,6 +204,8 @@ def sync_library(
     temp_dir = Path(tempfile.mkdtemp(prefix="ipod_sync_"))
     files_to_copy: list[tuple[Path, Path]] = []
     prepared_medias: list[PreparedMedia] = []
+    prepared_artworks: list[ArtworkAsset] = []
+    artwork_cache_by_digest: dict[str, int] = {}
     new_tracks: list[Track] = []
 
     try:
@@ -227,6 +245,28 @@ def sync_library(
                     media = prepared_audio(temp_track_id, file_dep, meta.encoding)
                     prepared_medias.append(media)
 
+                    assigned_artwork_id = 0
+                    if meta.artwork_data and device.supports_artwork and device.cover_formats:
+                        art_digest = hashlib.sha256(meta.artwork_data).hexdigest()
+                        if art_digest in artwork_cache_by_digest:
+                            assigned_artwork_id = artwork_cache_by_digest[art_digest]
+                        else:
+                            try:
+                                img = Image.open(io.BytesIO(meta.artwork_data))
+                                if img.mode != "RGB":
+                                    img = img.convert("RGB")
+                                w, h = img.size
+                                pixels = ArtworkPixels(w, h, img.tobytes())
+                                assigned_artwork_id = -(len(prepared_artworks) + 1)
+                                prepared_artworks.append(ArtworkAsset(assigned_artwork_id, pixels))
+                                artwork_cache_by_digest[art_digest] = assigned_artwork_id
+                            except Exception:
+                                pass
+                    else:
+                        alb_key = (meta.artist.casefold().strip(), meta.album.casefold().strip())
+                        if alb_key in album_artwork_map:
+                            assigned_artwork_id = album_artwork_map[alb_key]
+
                     track_meta = TrackMetadata(
                         location=ipod_rel_path,
                         sample_rate_hz=meta.sample_rate_hz,
@@ -250,6 +290,7 @@ def sync_library(
                             year=meta.year,
                             track_number=meta.track_number,
                             genre=meta.genre,
+                            artwork_id=assigned_artwork_id,
                             metadata=track_meta,
                         )
                     )
@@ -263,11 +304,30 @@ def sync_library(
 
         print_info("Validating and preparing iPod database...")
         draft = lib.begin_draft(desired_snapshot, delete_omissions=bool(tracks_to_delete))
-        plan = lib.analyze(draft)
-        write_result = lib.prepare(
-            plan,
-            WriteResources(media=tuple(prepared_medias), pending_playback_sidecars=False),
+        write_target = WriteTarget(cover_formats=device.cover_formats)
+        plan = lib.analyze(draft, target=write_target)
+
+        # Collect existing .ithmb files for artwork inventory and sources
+        ithmb_inventory: list[FileDependency] = []
+        ithmb_sources: list[SourceFile] = []
+        artwork_dir = target_mount / "iPod_Control" / "Artwork"
+        if artwork_dir.exists() and prepared_artworks:
+            for item in artwork_dir.iterdir():
+                if item.is_file() and item.suffix.lower() == ".ithmb":
+                    rel = f"iPod_Control/Artwork/{item.name}"
+                    data = item.read_bytes()
+                    dep = FileDependency(rel, len(data), hashlib.sha256(data).hexdigest())
+                    ithmb_inventory.append(dep)
+                    ithmb_sources.append(SourceFile(dep, data))
+
+        write_resources = WriteResources(
+            media=tuple(prepared_medias),
+            artwork=tuple(prepared_artworks),
+            files=tuple(ithmb_sources),
+            file_inventory=tuple(ithmb_inventory) if prepared_artworks else None,
+            pending_playback_sidecars=False,
         )
+        write_result = lib.prepare(plan, write_resources)
 
         if write_result.issues:
             print_error(f"Sync validation failed with {len(write_result.issues)} issue(s):")
@@ -290,8 +350,10 @@ def sync_library(
         commit_transaction(
             target_mount,
             write_result.prepared.itunes,
-            files_to_copy,
-            files_to_delete,
+            files_to_copy=files_to_copy,
+            files_to_delete=files_to_delete,
+            prepared_artwork=write_result.prepared.artwork,
+            prepared_artwork_files=write_result.prepared.artwork_files,
         )
 
         print_success(

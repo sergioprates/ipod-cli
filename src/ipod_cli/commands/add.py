@@ -1,20 +1,28 @@
-"""Command for adding tracks and videos to the iPod with automated conversion."""
-
-from __future__ import annotations
-
+import hashlib
+import io
 import os
 import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
+from PIL import Image
 import typer
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
+from iPodDB.library.artwork import ArtworkPixels
 from iPodDB.library.media import AudioEncoding, prepared_audio, prepared_video
 from iPodDB.library.models import MediaType, Track, TrackMetadata
-from iPodDB.library.writing import FileDependency, PreparedMedia, WriteResources
+from iPodDB.library.video import is_video_track
+from iPodDB.library.writing import (
+    ArtworkAsset,
+    FileDependency,
+    PreparedMedia,
+    SourceFile,
+    WriteResources,
+    WriteTarget,
+)
 from ipod_cli.allocator import MusicPathAllocator, count_music_directories
 from ipod_cli.commands.tracks import _format_duration
 from ipod_cli.device import discover_ipod_mounts, inspect_ipod, is_ipod_mount
@@ -113,6 +121,8 @@ def add_tracks(
             raise typer.Exit(1)
         target_mount = mounts[0]
 
+    device = inspect_ipod(target_mount)
+
     # 2. Collect input files
     input_files = _collect_files(paths)
     if not input_files:
@@ -164,6 +174,8 @@ def add_tracks(
     temp_dir = Path(tempfile.mkdtemp(prefix="ipod_add_"))
     files_to_copy: list[tuple[Path, Path]] = []
     prepared_medias: list[PreparedMedia] = []
+    prepared_artworks: list[ArtworkAsset] = []
+    artwork_cache_by_digest: dict[str, int] = {}
     new_tracks: list[Track] = []
 
     try:
@@ -207,6 +219,24 @@ def add_tracks(
                     media = prepared_video(temp_track_id, file_dep, has_audio=True)
                     prepared_medias.append(media)
 
+                    assigned_artwork_id = 0
+                    if meta.artwork_data and device.supports_artwork and device.cover_formats:
+                        art_digest = hashlib.sha256(meta.artwork_data).hexdigest()
+                        if art_digest in artwork_cache_by_digest:
+                            assigned_artwork_id = artwork_cache_by_digest[art_digest]
+                        else:
+                            try:
+                                img = Image.open(io.BytesIO(meta.artwork_data))
+                                if img.mode != "RGB":
+                                    img = img.convert("RGB")
+                                w, h = img.size
+                                pixels = ArtworkPixels(w, h, img.tobytes())
+                                assigned_artwork_id = -(len(prepared_artworks) + 1)
+                                prepared_artworks.append(ArtworkAsset(assigned_artwork_id, pixels))
+                                artwork_cache_by_digest[art_digest] = assigned_artwork_id
+                            except Exception:
+                                pass
+
                     track_meta = TrackMetadata(
                         location=ipod_rel_path,
                         sample_rate_hz=48000,
@@ -227,6 +257,7 @@ def add_tracks(
                         show=meta.show,
                         season_number=meta.season_number,
                         episode_number=meta.episode_number,
+                        artwork_id=assigned_artwork_id,
                         metadata=track_meta,
                     )
                 else:
@@ -246,6 +277,26 @@ def add_tracks(
 
                     album_key = (meta.artist.casefold().strip(), meta.album.casefold().strip())
                     inherited_artwork_id = album_artwork_map.get(album_key, 0)
+
+                    assigned_artwork_id = 0
+                    if meta.artwork_data and device.supports_artwork and device.cover_formats:
+                        art_digest = hashlib.sha256(meta.artwork_data).hexdigest()
+                        if art_digest in artwork_cache_by_digest:
+                            assigned_artwork_id = artwork_cache_by_digest[art_digest]
+                        else:
+                            try:
+                                img = Image.open(io.BytesIO(meta.artwork_data))
+                                if img.mode != "RGB":
+                                    img = img.convert("RGB")
+                                w, h = img.size
+                                pixels = ArtworkPixels(w, h, img.tobytes())
+                                assigned_artwork_id = -(len(prepared_artworks) + 1)
+                                prepared_artworks.append(ArtworkAsset(assigned_artwork_id, pixels))
+                                artwork_cache_by_digest[art_digest] = assigned_artwork_id
+                            except Exception:
+                                pass
+                    elif inherited_artwork_id > 0:
+                        assigned_artwork_id = inherited_artwork_id
 
                     file_dep = FileDependency(ipod_rel_path, meta.size_bytes, meta.sha256)
                     media = prepared_audio(temp_track_id, file_dep, meta.encoding)
@@ -273,7 +324,7 @@ def add_tracks(
                         year=meta.year,
                         track_number=meta.track_number,
                         genre=meta.genre,
-                        artwork_id=inherited_artwork_id,
+                        artwork_id=assigned_artwork_id,
                         metadata=track_meta,
                     )
 
@@ -285,17 +336,38 @@ def add_tracks(
         print_info("Preparing iPod database transaction...")
         desired_snapshot = replace(lib.snapshot, tracks=(*lib.snapshot.tracks, *new_tracks))
         draft = lib.begin_draft(desired_snapshot)
-        plan = lib.analyze(draft)
-        write_result = lib.prepare(
-            plan,
-            WriteResources(media=tuple(prepared_medias), pending_playback_sidecars=False),
+        write_target = WriteTarget(cover_formats=device.cover_formats)
+        plan = lib.analyze(draft, target=write_target)
+
+        # Collect existing .ithmb files for artwork inventory and sources
+        ithmb_inventory: list[FileDependency] = []
+        ithmb_sources: list[SourceFile] = []
+        artwork_dir = target_mount / "iPod_Control" / "Artwork"
+        if artwork_dir.exists() and prepared_artworks:
+            for item in artwork_dir.iterdir():
+                if item.is_file() and item.suffix.lower() == ".ithmb":
+                    rel = f"iPod_Control/Artwork/{item.name}"
+                    data = item.read_bytes()
+                    dep = FileDependency(rel, len(data), hashlib.sha256(data).hexdigest())
+                    ithmb_inventory.append(dep)
+                    ithmb_sources.append(SourceFile(dep, data))
+
+        write_resources = WriteResources(
+            media=tuple(prepared_medias),
+            artwork=tuple(prepared_artworks),
+            files=tuple(ithmb_sources),
+            file_inventory=tuple(ithmb_inventory) if prepared_artworks else None,
+            pending_playback_sidecars=False,
         )
+        write_result = lib.prepare(plan, write_resources)
 
         if write_result.issues:
-            print_error(f"Library validation failed with {len(write_result.issues)} issue(s):")
-            for issue in write_result.issues:
-                console.print(f"  [red]• {issue.code}[/red]: {issue.message} ({issue.detail or ''})")
-            raise typer.Exit(1)
+            errors = [i for i in write_result.issues if i.severity.name == "ERROR"]
+            if errors:
+                print_error(f"Library validation failed with {len(errors)} error(s):")
+                for issue in errors:
+                    console.print(f"  [red]• {issue.code}[/red]: {issue.message} ({issue.detail or ''})")
+                raise typer.Exit(1)
 
         if write_result.prepared is None:
             print_error("Prepared library returned no output data.")
@@ -333,6 +405,8 @@ def add_tracks(
             write_result.prepared.itunes,
             files_to_copy=files_to_copy,
             files_to_delete=[],
+            prepared_artwork=write_result.prepared.artwork,
+            prepared_artwork_files=write_result.prepared.artwork_files,
         )
 
         print_success(f"Success! [bold green]{len(new_tracks)}[/bold green] item(s) added to iPod library.")

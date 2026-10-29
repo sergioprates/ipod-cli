@@ -94,6 +94,9 @@ uv run ipod remove --search "Obsolete" --dry-run
 uv run ipod playlists create "New Mix" --search "Daft Punk" --dry-run
 uv run ipod playlists add-tracks "New Mix" 3084 --dry-run
 uv run ipod playlists remove "Obsolete Playlist" --dry-run
+
+# Preview artwork compilation
+uv run ipod artwork sync --dry-run
 ```
 
 ### Non-Interactive Automation:
@@ -103,6 +106,7 @@ uv run ipod remove 780 781 --yes
 uv run ipod playlists remove "Obsolete Playlist" --yes
 uv run ipod sync ./local_library --yes
 uv run ipod backup restore "ipod_backups/backup.zip" --yes
+uv run ipod artwork sync --yes
 ```
 
 ---
@@ -177,6 +181,13 @@ When generating code, running commands, or modifying files:
      2. Build `Track(track_id=-idx, media_types=(MediaType.VIDEO,), ...)` (or `MediaType.MUSIC_VIDEO` / `MediaType.TV_SHOW`).
      3. Build `PreparedMedia` using `prepared_video(track_id, FileDependency(...), has_audio=True)`.
      4. Commit via `lib.prepare()` and `commit_transaction()`.
+   - To compile / link album artwork:
+     1. Physical iPods require artwork precompiled into `ArtworkDB` and `.ithmb` uncompressed 16-bit RGB565 files (Format 1028: 100x100; Format 1029: 200x200). The firmware never reads embedded tags directly for the screen.
+     2. For each unique cover, create `pixels = ArtworkPixels(w, h, rgb888_bytes)` and `ArtworkAsset(assigned_artwork_id, pixels)` with negative IDs (`-1`, `-2`, etc.).
+     3. Set `t.artwork_id = assigned_artwork_id` on each track sharing that album art.
+     4. Pass `target = WriteTarget(cover_formats=device.cover_formats)` to `lib.analyze(draft, target=target)`.
+     5. Read existing `.ithmb` files in `iPod_Control/Artwork/`, and pass them as `SourceFile(dep, data)` in `WriteResources(files=...)` and `FileDependency(rel, size, sha256)` in `WriteResources(file_inventory=...)`.
+     6. Pass `prepared_artwork=write_result.prepared.artwork` and `prepared_artwork_files=write_result.prepared.artwork_files` to `storage_ops.commit_transaction()`.
    - To remove a track:
      - Always pass `lib.begin_draft(desired, delete_omissions=True)`. Without `delete_omissions=True`, the database validation will correctly flag a `draft.deletion_not_enabled` error.
 

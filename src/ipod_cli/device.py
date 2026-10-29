@@ -12,7 +12,9 @@ from typing import Optional
 
 from device_registry import DEFAULT_DEVICE_REGISTRY, parse_sysinfo, parse_sysinfo_extended
 from device_registry.models import DeviceEvidence, IdentificationStatus
+from iPodDB.ArtworkDB.ithmb import IthmbPixelFormat as CoverPixelFormat
 from iPodDB.library import IPodLibrary
+from iPodDB.library.artwork import CoverFormat
 from storage import Storage
 from storage.models import ScsiVpdPagePlan
 
@@ -48,6 +50,7 @@ class IPodDevice:
     supports_artwork: bool
     supports_video: bool
     database_found: bool
+    cover_formats: tuple[CoverFormat, ...] = ()
 
 
 def _find_case_insensitive_path(base: Path, *segments: str) -> Optional[Path]:
@@ -200,6 +203,8 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
     supports_artwork = True
     supports_video = False
 
+    cover_formats: tuple[CoverFormat, ...] = ()
+
     ident = DEFAULT_DEVICE_REGISTRY.identify(evidence)
     if ident.status == IdentificationStatus.EXACT and ident.profile:
         prof = ident.profile
@@ -211,6 +216,40 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
         supports_alac = prof.capabilities.audio.supports_alac
         supports_artwork = prof.capabilities.artwork.supports_cover_art
         supports_video = prof.capabilities.video.supported
+        if prof.capabilities.artwork.cover_formats:
+            cover_formats = tuple(
+                CoverFormat(
+                    f.format_id,
+                    f.width,
+                    f.height,
+                    f.row_bytes,
+                    CoverPixelFormat(f.pixel_format.value),
+                )
+                for f in prof.capabilities.artwork.cover_formats
+            )
+
+    # Fallback cover formats for known iPod models if profile lookup did not resolve them
+    if not cover_formats and supports_artwork:
+        gen_l = generation.lower()
+        model_l = model_name.lower()
+        fam_l = family.lower()
+        if "5" in gen_l or "video" in model_l:
+            cover_formats = (
+                CoverFormat(1028, 100, 100, 200, CoverPixelFormat.RGB565_LE),
+                CoverFormat(1029, 200, 200, 400, CoverPixelFormat.RGB565_LE),
+            )
+        elif "classic" in fam_l or "6" in gen_l or "7" in gen_l:
+            cover_formats = (
+                CoverFormat(1055, 128, 128, 256, CoverPixelFormat.RGB565_LE),
+                CoverFormat(1060, 320, 320, 640, CoverPixelFormat.RGB565_LE),
+                CoverFormat(1061, 56, 56, 112, CoverPixelFormat.RGB565_LE),
+                CoverFormat(1068, 128, 128, 256, CoverPixelFormat.RGB565_LE),
+            )
+        elif "nano" in fam_l:
+            cover_formats = (
+                CoverFormat(1031, 42, 42, 84, CoverPixelFormat.RGB565_LE),
+                CoverFormat(1027, 100, 100, 200, CoverPixelFormat.RGB565_LE),
+            )
 
     if evidence.product_serials:
         serial_number = evidence.product_serials[0].value
@@ -263,4 +302,5 @@ def inspect_ipod(mount_path: Path) -> IPodDevice:
         supports_artwork=supports_artwork,
         supports_video=supports_video,
         database_found=database_found,
+        cover_formats=cover_formats,
     )

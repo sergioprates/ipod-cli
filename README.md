@@ -217,9 +217,22 @@ uv run ipod video list --json
 ```
 
 ### 11. `ipod artwork`
-Manage and optimize embedded album cover artwork for iPod compatibility.
+Manage, optimize, and compile album cover artwork into native iPod `ArtworkDB` and `.ithmb` files.
+
+> **Why iPod ArtworkDB matters**: Physical iPod hardware never decodes ID3 or M4A artwork tags directly from audio files during playback. Instead, it reads precompiled 16-bit RGB565 bitmaps from `.ithmb` files indexed in `iPod_Control/Artwork/ArtworkDB`. `ipod-sync` automatically compiles these native bitmaps.
+
 ```bash
-# Attach an image to an audio or video file (auto-resizes to 500x500 JPEG 85%)
+# Scan existing tracks on the iPod, extract embedded covers, and compile into ArtworkDB (.ithmb)
+uv run ipod artwork sync --dry-run
+uv run ipod artwork sync
+
+# Sync artwork using a local directory for covers (folder.jpg, cover.jpg)
+uv run ipod artwork sync --folder "C:\Users\User\Music"
+
+# Assign a cover image to a track on the iPod by track ID (compiles to ArtworkDB immediately)
+uv run ipod artwork set 3130 cover.jpg
+
+# Attach an image to a local audio or video file (auto-resizes to 500x500 JPEG 85%)
 uv run ipod artwork set track.mp3 cover.png
 
 # Resize existing embedded artwork in audio/video files to 500x500 JPEG 85%

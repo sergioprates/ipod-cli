@@ -10,9 +10,11 @@ from typing import Optional
 
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+import os
 from iPodDB.library import IPodLibrary
+from iPodDB.library.file_content import content_chunks
 from iPodDB.library.models import LibrarySnapshot, Track
-from iPodDB.library.writing import PreparedLibrary
+from iPodDB.library.writing import PreparedFile, PreparedLibrary
 from ipod_cli.ui import console, print_error, print_info, print_success, print_warning
 
 logger = logging.getLogger(__name__)
@@ -55,9 +57,10 @@ def load_ipod_library(mount_point: Path) -> IPodLibrary:
 
 
 def save_pre_write_backup(mount_point: Path) -> Path:
-    """Create a fast automated backup of iTunesDB prior to any write."""
+    """Create a fast automated backup of iTunesDB and ArtworkDB prior to any write."""
     paths = get_ipod_paths(mount_point)
     itunes_file = paths["itunesdb"]
+    artwork_file = paths["artworkdb"]
 
     backup_dir = Path("ipod_backups") / "pre_sync"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +77,14 @@ def save_pre_write_backup(mount_point: Path) -> Path:
     except Exception:
         pass
 
+    if artwork_file.exists():
+        try:
+            art_bak = backup_dir / f"ArtworkDB_auto_{timestamp}.bak"
+            shutil.copy2(artwork_file, art_bak)
+            shutil.copy2(artwork_file, artwork_file.with_name("ArtworkDB.bak"))
+        except Exception:
+            pass
+
     return bak_dest
 
 
@@ -82,31 +93,53 @@ def commit_transaction(
     prepared_itunes: bytes,
     files_to_copy: list[tuple[Path, Path]],  # (src_local, dst_ipod)
     files_to_delete: list[Path] | None = None,
+    prepared_artwork: bytes | None = None,
+    prepared_artwork_files: tuple[PreparedFile, ...] | None = None,
 ) -> None:
     """Commit changes to the iPod using transactional atomic file operations."""
     paths = get_ipod_paths(mount_point)
     itunes_file = paths["itunesdb"]
     itunes_tmp = itunes_file.with_name("iTunesDB.tmp")
+    artwork_file = paths["artworkdb"]
+    artwork_tmp = artwork_file.with_name("ArtworkDB.tmp")
 
     # 1. Automatic pre-write backup
     save_pre_write_backup(mount_point)
 
-    # 2. Copy new audio files into destination Fxx directories
+    # 2. Copy new audio/video files into destination Fxx directories
     copied_successfully: list[Path] = []
+    artwork_files_written: list[Path] = []
     try:
         for src, dst in files_to_copy:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             copied_successfully.append(dst)
 
-        # 3. Write new iTunesDB into temporary file
-        itunes_tmp.write_bytes(prepared_itunes)
+        # 3. Write and replace artwork files (.ithmb) if present
+        if prepared_artwork_files:
+            for pf in prepared_artwork_files:
+                target_dest = mount_point / pf.relative_path.replace("/", os.sep)
+                target_dest.parent.mkdir(parents=True, exist_ok=True)
+                tmp_dest = target_dest.with_name(f"{target_dest.name}.tmp")
+                with open(tmp_dest, "wb") as out_fp:
+                    for chunk in content_chunks(pf.data):
+                        out_fp.write(chunk)
+                tmp_dest.replace(target_dest)
+                artwork_files_written.append(target_dest)
 
-        # 4. Atomically replace the existing iTunesDB
+        # 4. Write new ArtworkDB if present
+        if prepared_artwork is not None:
+            artwork_file.parent.mkdir(parents=True, exist_ok=True)
+            artwork_tmp.write_bytes(prepared_artwork)
+            if artwork_tmp.exists():
+                artwork_tmp.replace(artwork_file)
+
+        # 5. Write new iTunesDB into temporary file and atomically replace
+        itunes_tmp.write_bytes(prepared_itunes)
         if itunes_tmp.exists():
             itunes_tmp.replace(itunes_file)
 
-        # 5. Physically delete removed tracks (if requested)
+        # 6. Physically delete removed tracks (if requested)
         if files_to_delete:
             for f in files_to_delete:
                 if f.exists() and f.is_file():
@@ -117,12 +150,13 @@ def commit_transaction(
 
     except Exception as exc:
         print_error(f"Error while committing changes to iPod: {exc}")
-        # Rollback: remove temporary file if present
-        if itunes_tmp.exists():
-            try:
-                itunes_tmp.unlink()
-            except Exception:
-                pass
+        # Rollback: remove temporary files if present
+        for tmp_f in (itunes_tmp, artwork_tmp):
+            if tmp_f.exists():
+                try:
+                    tmp_f.unlink()
+                except Exception:
+                    pass
         # Remove newly copied files from the failed transaction
         for copied in copied_successfully:
             if copied.exists():
