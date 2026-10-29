@@ -122,15 +122,18 @@ ipod-sync/
 │   │   ├── allocator.py       # MusicPathAllocator (F00-F49 FAT32 path generator)
 │   │   ├── metadata.py        # Tag extraction via Mutagen (MP3, MP4, FLAC, WAV)
 │   │   ├── storage_ops.py     # Safe atomic transactions, stage & pre-write backups
-│   │   ├── transcode.py       # FFmpeg audio pipeline (ALAC 44.1kHz SoX / faststart)
+│   │   ├── transcode.py       # FFmpeg audio pipeline (ALAC 44.1kHz SoX / faststart) & H.264 video
+│   │   ├── artwork.py         # Pillow image pipeline (500x500 JPEG 85% resize & tag embedding)
 │   │   └── commands/
-│   │       ├── add.py         # 'ipod add' command
+│   │       ├── add.py         # 'ipod add' command (audio and video)
 │   │       ├── remove.py      # 'ipod remove' command
 │   │       ├── sync.py        # 'ipod sync' command
 │   │       ├── tracks.py      # 'ipod tracks' command
 │   │       ├── playlists.py   # 'ipod playlists' command
 │   │       ├── export.py      # 'ipod export' command
-│   │       └── backup.py      # 'ipod backup' command (create, list, restore)
+│   │       ├── backup.py      # 'ipod backup' command (create, list, restore)
+│   │       ├── video.py       # 'ipod video' command (convert, add, list)
+│   │       └── artwork.py     # 'ipod artwork' command (set, resize, extract)
 │   ├── iPodDB/                # Low-level binary database engine
 │   │   ├── library/           # IPodLibrary, snapshot models, draft/plan/prepare
 │   │   ├── iTunesDB/          # Binary MHBD/MHSD/MHIT/MHOD parser & serializer
@@ -157,6 +160,7 @@ When generating code, running commands, or modifying files:
    - **Video Codec**: Strictly H.264 Baseline Profile with `-profile:v baseline -level 1.3` (320x240) or `-level 3.0` (640x480).
    - **Video Pixel Format**: Strictly 8-bit YUV 4:2:0 (`-pix_fmt yuv420p`). Other pixel formats (such as 4:4:4 or RGB) will fail on the iPod decoder.
    - **Video Framerate & Bitrate**: Max 30 fps; video bitrate default 768 kbps (max 1500 kbps); AAC-LC audio up to 160 kbps 48 kHz stereo.
+   - **Artwork Dimensions & Quality**: Strictly **500x500 pixels max JPEG at 85% quality** (`image/jpeg`). Never embed raw 2000x2000+ PNGs or images exceeding 500-600px; oversized artwork exhausts the iPod's 32MB/64MB SDRAM buffer and causes UI lockups during playback. Auto-resize with `artwork.process_artwork_image()`.
 
 3. **Database Preparation Protocol (`iPodDB.library`)**:
    - To add an audio track:

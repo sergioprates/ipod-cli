@@ -12,6 +12,7 @@ import mutagen
 from mutagen.mp4 import MP4
 
 from iPodDB.library.media import AudioEncoding
+from ipod_cli.artwork import find_adjacent_artwork, process_artwork_image
 from ipod_cli.transcode import is_video_file, probe_media_file
 
 
@@ -74,7 +75,11 @@ def _compute_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def extract_metadata(file_path: Path) -> AudioMetadata:
+def extract_metadata(
+    file_path: Path,
+    artwork_override: Optional[Path | bytes] = None,
+    auto_find_artwork: bool = True,
+) -> AudioMetadata:
     """Extract metadata from audio or video files (MP3, M4A, M4V, FLAC, MKV, MP4, etc.)."""
     path = Path(file_path)
     size_bytes = path.stat().st_size
@@ -243,6 +248,25 @@ def extract_metadata(file_path: Path) -> AudioMetadata:
                 album = tags.get("album", album)
                 if "date" in tags:
                     year = _parse_year(tags["date"])
+
+    # Artwork resolution and optimization (target 500x500 JPEG 85%)
+    if artwork_override:
+        try:
+            artwork_data = process_artwork_image(artwork_override)
+        except Exception:
+            pass
+    elif artwork_data:
+        try:
+            artwork_data = process_artwork_image(artwork_data)
+        except Exception:
+            pass
+    elif auto_find_artwork:
+        adjacent = find_adjacent_artwork(path)
+        if adjacent:
+            try:
+                artwork_data = process_artwork_image(adjacent)
+            except Exception:
+                pass
 
     return AudioMetadata(
         title=title.strip() or path.stem,

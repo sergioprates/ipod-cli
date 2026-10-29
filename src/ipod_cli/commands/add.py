@@ -84,6 +84,12 @@ def add_tracks(
         "-k",
         help="Classification for video files: 'movie', 'music-video', or 'tv-show'.",
     ),
+    artwork: Optional[str] = typer.Option(
+        None,
+        "--artwork",
+        "--cover",
+        help="Image file (JPEG/PNG) to apply as album artwork (auto-resized to 500x500 JPEG).",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -114,6 +120,17 @@ def add_tracks(
         raise typer.Exit(0)
 
     print_info(f"Found [bold]{len(input_files)}[/bold] media file(s) to process.")
+
+    # Check artwork override if provided
+    artwork_override_bytes: Optional[bytes] = None
+    if artwork:
+        art_path = Path(artwork)
+        if not art_path.is_file():
+            print_error(f"Artwork file '{artwork}' not found.")
+            raise typer.Exit(1)
+        from ipod_cli.artwork import process_artwork_image
+        artwork_override_bytes = process_artwork_image(art_path)
+        print_info(f"Using artwork override from [bold cyan]{art_path.name}[/bold cyan] (500x500 JPEG).")
 
     # 3. Load iPod database
     try:
@@ -182,7 +199,7 @@ def add_tracks(
                         )
                         process_file = vid_temp
 
-                    meta = extract_metadata(process_file)
+                    meta = extract_metadata(process_file, artwork_override=artwork_override_bytes)
                     ipod_rel_path = allocator.allocate("m4v")
                     ipod_abs_dst = target_mount / ipod_rel_path.replace("/", os.sep)
 
@@ -222,7 +239,7 @@ def add_tracks(
                         transcode_to_alac(src_file, alac_temp)
                         process_file = alac_temp
 
-                    meta = extract_metadata(process_file)
+                    meta = extract_metadata(process_file, artwork_override=artwork_override_bytes)
                     ext = process_file.suffix.lstrip(".").lower()
                     ipod_rel_path = allocator.allocate(ext)
                     ipod_abs_dst = target_mount / ipod_rel_path.replace("/", os.sep)

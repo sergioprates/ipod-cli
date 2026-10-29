@@ -51,6 +51,20 @@ For the iPod Video (5th / 5.5th Gen), `ipod-sync` includes a dedicated hardware-
 
 ---
 
+## 🎨 Album Artwork Profile & Hardware Best Practices
+
+Embedded artwork is optimized to match the display and memory hardware of the iPod:
+
+* **Ideal Resolution**: **500x500 pixels** (Resize Mode: Max / Fit).
+* **Ideal Format & Encoding**: **JPEG at 85% Quality** (`image/jpeg`, baseline/progressive).
+* **Hardware Rationale**:
+  * **Display Match**: The iPod Video 5.5th Gen display is 320x240. The "Now Playing" cover art thumbnail renders at 100x100 px (scaled up to 200x200 or 320x240 in full screen). 500x500 px provides maximum sharpness even on larger external displays without any wasted pixels.
+  * **Memory / SDRAM Protection**: The iPod 5.5 has limited SDRAM (32 MB on 30GB models; 64 MB on 80GB models). Massive embedded art (e.g. 3000x3000 8MB PNGs) exhausts available RAM when browsing albums, slows down UI responsiveness, and increases battery drain.
+  * **Lightweight Footprint**: A 500x500 JPEG at 85% quality averages between **40 KB and 80 KB**, delivering crisp visuals with minimal storage and memory impact.
+* **Auto-Discovery**: When adding tracks without embedded artwork, `ipod-sync` automatically looks for adjacent folder art (`cover.jpg`, `folder.jpg`, `front.jpg`, `album.jpg`) and attaches it.
+
+---
+
 ## 🛠️ CLI Command Reference
 
 ### 1. `ipod detect`
@@ -200,6 +214,20 @@ uv run ipod video add episode.mkv --kind tv-show --show "Breaking Bad" --season 
 # List all videos present on the iPod
 uv run ipod video list
 uv run ipod video list --json
+```
+
+### 11. `ipod artwork`
+Manage and optimize embedded album cover artwork for iPod compatibility.
+```bash
+# Attach an image to an audio or video file (auto-resizes to 500x500 JPEG 85%)
+uv run ipod artwork set track.mp3 cover.png
+
+# Resize existing embedded artwork in audio/video files to 500x500 JPEG 85%
+uv run ipod artwork resize song.m4a
+uv run ipod artwork resize ./music_folder/
+
+# Extract embedded artwork from a track to a JPEG file
+uv run ipod artwork extract track.m4a album_cover.jpg
 ```
 
 ---
