@@ -66,6 +66,12 @@ uv run ipod tracks --limit 100 --json
 uv run ipod playlists --json
 ```
 
+### Inspect specific playlist and tracks as JSON:
+```bash
+uv run ipod playlists show "Rock Hits" --json
+uv run ipod playlists show 12815454400400274375 --json
+```
+
 ### Safe Pre-execution Simulations:
 Always run with `--dry-run` before modifying disk state on physical hardware:
 ```bash
@@ -77,12 +83,18 @@ uv run ipod sync ./local_library --dry-run
 
 # Preview track removal
 uv run ipod remove --search "Obsolete" --dry-run
+
+# Preview playlist operations
+uv run ipod playlists create "New Mix" --search "Daft Punk" --dry-run
+uv run ipod playlists add-tracks "New Mix" 3084 --dry-run
+uv run ipod playlists remove "Obsolete Playlist" --dry-run
 ```
 
 ### Non-Interactive Automation:
 In headless agent environments, pass `--yes` / `-y` to skip terminal confirmation prompts:
 ```bash
 uv run ipod remove 780 781 --yes
+uv run ipod playlists remove "Obsolete Playlist" --yes
 uv run ipod sync ./local_library --yes
 uv run ipod backup restore "ipod_backups/backup.zip" --yes
 ```

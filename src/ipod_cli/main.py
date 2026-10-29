@@ -25,7 +25,7 @@ app = typer.Typer(
 
 # Register command modules
 app.command(name="tracks")(tracks.list_tracks)
-app.command(name="playlists")(playlists.list_playlists)
+app.add_typer(playlists.app, name="playlists")
 app.command(name="export")(export.export_tracks)
 app.command(name="add")(add.add_tracks)
 app.command(name="remove")(remove.remove_tracks)

@@ -71,10 +71,34 @@ uv run ipod tracks --json > tracks.json
 ```
 
 ### 4. `ipod playlists`
-Lists all user and smart playlists existing in the iPod library.
+Manage iPod playlists: query, inspect, create, modify, rename, and delete.
 ```bash
+# List all playlists
 uv run ipod playlists
 uv run ipod playlists --json
+
+# Show details and track listing of a playlist
+uv run ipod playlists show "Rock Hits"
+uv run ipod playlists show "Rock Hits" --json
+
+# Create a new playlist (optionally filtering tracks to add immediately)
+uv run ipod playlists create "Rock Hits" 3079 3082
+uv run ipod playlists create "Ariana Mix" --search "Ariana"
+uv run ipod playlists create "Synthwave" --artist "Kavinsky" --dry-run
+
+# Append tracks to an existing playlist
+uv run ipod playlists add-tracks "Rock Hits" 3084 3086
+uv run ipod playlists add-tracks "Rock Hits" --search "Daft Punk"
+
+# Remove tracks from a playlist (does NOT delete audio files from disk)
+uv run ipod playlists remove-tracks "Rock Hits" 3079
+uv run ipod playlists remove-tracks "Rock Hits" --all
+
+# Rename a playlist
+uv run ipod playlists rename "Rock Hits" "80s Rock"
+
+# Delete a playlist (does NOT delete audio files from disk)
+uv run ipod playlists remove "80s Rock" --yes
 ```
 
 ### 5. `ipod export`
