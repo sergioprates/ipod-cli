@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ipod_cli import __version__
+from ipod_cli.commands import export, playlists, tracks
 from ipod_cli.device import discover_ipod_mounts, inspect_ipod, is_ipod_mount
 from ipod_cli.ui import console, error_console, print_banner, print_error, print_info, print_success, print_warning
 
@@ -21,6 +22,13 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+
+# Registra os comandos
+app.command(name="tracks")(tracks.list_tracks)
+app.command(name="playlists")(playlists.list_playlists)
+app.command(name="export")(export.export_tracks)
+
+
 
 
 def version_callback(value: bool) -> None:
